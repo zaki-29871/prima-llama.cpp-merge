@@ -57,6 +57,21 @@
 using json = common_json;
 using namespace common_arg_utils;
 
+static std::string format(const char * fmt, ...) {
+    va_list ap;
+    va_list ap2;
+    va_start(ap, fmt);
+    va_copy(ap2, ap);
+    int size = vsnprintf(NULL, 0, fmt, ap);
+    GGML_ASSERT(size >= 0 && size < INT_MAX); // NOLINT
+    std::vector<char> buf(size + 1);
+    int size2 = vsnprintf(buf.data(), size + 1, fmt, ap2);
+    GGML_ASSERT(size2 == size);
+    va_end(ap2);
+    va_end(ap);
+    return std::string(buf.data(), size);
+}
+
 static std::initializer_list<enum llama_example> mmproj_examples = {
     LLAMA_EXAMPLE_MTMD,
     LLAMA_EXAMPLE_SERVER,
@@ -4809,6 +4824,131 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             //params.speculative.ngram_map_k4v.min_hits = 2;
         }
     ).set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
+
+        // prima.cpp's options.
+    add_opt(common_arg(
+        {"-w", "--world", "--world-size"}, "N",
+        format("number of devices to use (default: %d)", params.n_world),
+        [](common_params & params, int value) {
+            params.n_world = value;
+        }
+    ).set_env("LLAMA_ARG_N_WORLD"));
+    add_opt(common_arg(
+        {"-r", "--rank", "--my-rank"}, "N",
+        format("my rank for distributed inference (default: %d)", params.rank),
+        [](common_params & params, int value) {
+            params.rank = value;
+        }
+    ).set_env("LLAMA_ARG_RANK"));
+    add_opt(common_arg(
+        {"-lw", "--layer-window", "--n-layer-window"}, "N",
+        format("number of layers to process in each compute (e.g., 16,16)"),
+        [](common_params & params, const std::string & value) {
+            uint32_t result[32] = {0};
+            size_t index = 0;
+            std::stringstream ss(value);
+            std::string item;
+
+            while (std::getline(ss, item, ',')) {
+                try {
+                    int num = std::stoi(item);
+                    
+                    if (num <= 0) { 
+                        throw std::runtime_error("All values in --n-layer-window must be non-zero positive integers");
+                    }
+
+                    if (index >= 32) {
+                        throw std::runtime_error("Too many values in --n-layer-window (maximum is 32)");
+                    }
+
+                    result[index++] = static_cast<uint32_t>(num);
+                } catch (const std::invalid_argument &) {
+                    throw std::runtime_error("Non-integer value found in --n-layer-window");
+                }
+            }
+
+            if (index == 0) {
+                throw std::runtime_error("Input cannot be empty");
+            }
+
+            std::copy(std::begin(result), std::end(result), params.n_layer_window);
+        }
+    ).set_env("LLAMA_ARG_N_LAYER_WINDOW"));
+    add_opt(common_arg(
+        {"-mip", "--master", "--master-ip"}, "IPAddress",
+        format("ip address of the master node (default: %s)", params.master_ip.c_str()),
+        [](common_params & params, const std::string & value) {
+            params.master_ip = value;
+        }
+    ).set_env("LLAMA_ARG_MASTER_IP"));
+    add_opt(common_arg(
+        {"-nip", "--next", "--next-node", "--next-ip", "--next-node-ip"}, "IPAddress",
+        format("ip address of the next node (default: %s)", params.next_node_ip.c_str()),
+        [](common_params & params, const std::string & value) {
+            params.next_node_ip = value;
+        }
+    ).set_env("LLAMA_ARG_NEXT_NODE_IP"));
+    add_opt(common_arg(
+        {"--data-port"}, "N",
+        format("data port for distributed inference (default: %d)", params.data_port),
+        [](common_params & params, int value) {
+            params.data_port = value;
+        }
+    ).set_env("LLAMA_ARG_DATA_PORT"));
+    add_opt(common_arg(
+        {"--signal-port"}, "N",
+        format("signal port for distributed inference (default: %d)", params.signal_port),
+        [](common_params & params, int value) {
+            params.signal_port = value;
+        }
+    ).set_env("LLAMA_ARG_SIGNAL_PORT"));
+    add_opt(common_arg(
+        {"--prefetch"},
+        format("whether to prefetch layer weights (default: %s)", params.prefetch ? "true" : "false"),
+        [](common_params & params) {
+            params.prefetch = true;
+        }
+    ).set_env("LLAMA_ARG_UNLOAD"));
+#ifdef GGML_USE_CUDA
+    add_opt(llama_arg(
+        {"--keep-out-in-cuda"},
+        format("whether to compute the output layer on CUDA (default: %s)", params.keep_out_in_cuda ? "true" : "false"),
+        [](gpt_params & params) {
+            params.keep_out_in_cuda = true;
+        }
+    ).set_env("LLAMA_ARG_KEEP_INP_OUT_IN_CUDA"));
+#endif
+    add_opt(common_arg(
+        {"--force"},
+        format("force to start prefetching after computation (default: %s)", params.force ? "true" : "false"),
+        [](common_params & params) {
+            params.force = true;
+        }
+    ).set_env("LLAMA_ARG_FORCE"));
+    add_opt(common_arg(
+        {"--master-priority"}, "N",
+        format("priority to assign workload to the master (default: %f, set 1.01 to use master first, and 0.99 to offload to other devices)", params.master_priority),
+        [](common_params & params, const std::string & value) {
+            params.master_priority = std::stof(value);
+        }
+    ).set_env("LLAMA_ARG_MASTER_PRIORITY"));
+    add_opt(common_arg(
+        {"-gm", "--gpu-mem"}, "N", 
+        format("maximum GPU memory to use (default: %d)", params.gpu_mem),
+        [](common_params & params, int value) {
+            params.gpu_mem = value; // in GiB
+            if (value == 0) {
+                LOG_WRN("WARN: Set --gpu-mem to 0 may lead to errors during workload distribution.\n");
+            }
+        }
+    ).set_env("LLAMA_ARG_CUDA_MEM"));
+    add_opt(common_arg(
+        {"-k", "--n-cycles"}, "N",
+        format("number of cycles to output one token (default: %d)", params.n_cycles),
+        [](common_params & params, int value) {
+            params.n_cycles = value;
+        }
+    ).set_env("LLAMA_ARG_K"));
 
     return ctx_arg;
 }

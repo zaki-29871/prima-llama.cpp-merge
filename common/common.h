@@ -774,6 +774,22 @@ struct common_params {
     std::string tts_speaker_file = "";
 
     bool is_gen_docs = false; // whether we are running inside llama-gen-docs
+
+        // prima.cpp parameters.
+    int32_t n_world               =     1; // number of devices to use
+    int32_t rank                  =     0; // my rank for distributed inference
+    uint32_t n_layer_window[32]   =   {0}; // layer window size on each node
+    std::string master_ip         = "127.0.0.1"; // ip address of the master node
+    std::string next_node_ip      = "127.0.0.1"; // ip address of my next node
+    uint32_t data_port            =  9000;  // data port for distributed inference
+    uint32_t signal_port          =  10000; // signal port for distributed inference
+    bool    prefetch              = false; // prefetch layer weights
+    bool    keep_out_in_metal     =  true; // whether to keep output weights in metal memory, true by default
+    bool    keep_out_in_cuda      = false; // whether to run the output layer on CUDA, false by default
+    bool    force                 = false; // force to start prefetching after computation
+    float   master_priority       =  1.01; // priority to assign workload to the master (set 1.01 to use master first, and 0.99 to offload to other devices)
+    int32_t gpu_mem               = 999.0; // gpu memory to use, in GiB
+    int32_t n_cycles              =     0; // number of cycles to output one token
 };
 
 // call once at the start of a program if it uses libcommon
