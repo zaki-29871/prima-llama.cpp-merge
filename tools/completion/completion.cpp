@@ -95,6 +95,23 @@ int llama_completion(int argc, char ** argv) {
         return 1;
     }
 
+    uint32_t n_world  = params.n_world;
+    uint32_t my_rank  = params.rank;
+    GGML_ASSERT(!(n_world == 1 && my_rank > 0));
+
+    // check if --n-layer-window and --world is matched
+    if (my_rank == 0) {
+        uint32_t non_zero_count = 0;
+        size_t size = sizeof(params.n_layer_window) / sizeof(params.n_layer_window[0]);
+        for (size_t i = 0; i < size; ++i) {
+            if (params.n_layer_window[i] != 0) {
+                ++non_zero_count;
+            }
+        }
+        GGML_ASSERT((non_zero_count == 0 || non_zero_count == n_world) \
+            && "Number of non-zero values in --n-layer-window must equal --world");
+    }
+
     auto & sparams = params.sampling;
 
     // save choice to use color for later
@@ -141,6 +158,10 @@ int llama_completion(int argc, char ** argv) {
     LOG_INF("%s: load the model and apply lora adapter, if any\n", __func__);
 
     auto llama_init = common_init_from_params(params);
+
+    // update my rank and world size if any devices removed
+    my_rank = params.rank;
+    n_world = params.n_world;
 
     ctx   = llama_init->context();
     model = llama_init->model();
@@ -244,6 +265,56 @@ int llama_completion(int argc, char ** argv) {
         LOG_DBG("formatted: '%s'\n", formatted.c_str());
         return formatted;
     };
+
+    // May can be deleted.
+    if (my_rank == 0) {
+        auto prompt = (params.conversation_mode && params.enable_chat_template && !params.prompt.empty())
+            ? chat_add_and_format("system", params.prompt) // format the system prompt in conversation mode
+            : params.prompt;
+        if (params.interactive_first || !params.prompt.empty() || session_tokens.empty()) {
+            LOG_DBG("tokenize the prompt\n");
+            
+            // upper bound: one token per byte, plus room for BOS/EOS
+            int n_tokens = prompt.length() + 2 * true; // "true" is add_special.
+            embd_inp.resize(n_tokens);
+            n_tokens = ::llama_tokenize(vocab, prompt.data(), prompt.length(), embd_inp.data(), embd_inp.size(), true, true);
+            if (n_tokens == std::numeric_limits<int32_t>::min()) {
+                throw std::runtime_error("tokenization result exceeds int32_t limit");
+            }
+            if (n_tokens < 0) {
+                // buffer was too small: -n_tokens is the size it needs
+                embd_inp.resize(-n_tokens);
+                int check = llama_tokenize(vocab, prompt.data(), prompt.length(),
+                                           embd_inp.data(), embd_inp.size(), true, true);
+                GGML_ASSERT(check == -n_tokens);
+            } else {
+                embd_inp.resize(n_tokens);
+            }
+        } else {
+            LOG_DBG("use session tokens\n");
+            embd_inp = session_tokens;
+        }
+
+        LOG_DBG("prompt: \"%s\"\n", prompt.c_str());
+        LOG_DBG("tokens: %s\n", string_from(ctx, embd_inp).c_str());
+
+        // should not run without any tokens
+        if (embd_inp.empty()) {
+            if (add_bos) {
+                embd_inp.push_back(llama_token_bos(vocab));
+                LOG_WRN("embd_inp was considered empty and bos was added: %s\n", string_from(ctx, embd_inp).c_str());
+            } else {
+                LOG_ERR("input is empty\n");
+                return -1;
+            }
+        }
+
+        // tokenize negative prompt
+        if ((int) embd_inp.size() > n_ctx - 4) {
+            LOG_ERR("%s: prompt is too long (%d tokens, max %d)\n", __func__, (int) embd_inp.size(), n_ctx - 4);
+            return 1;
+        }
+    }
 
     std::string prompt;
     {
