@@ -4,6 +4,7 @@
 
 #include "build-info.h"
 #include "common.h"
+#include "prima.h"
 
 #include "../src/llama-ext.h"
 
@@ -1164,6 +1165,12 @@ struct common_init_result::impl {
 
     common_threadpools threadpools;
 
+    // prima.cpp ring connection, used by the context, so it must outlive the context
+    struct prima_net_deleter {
+        void operator()(llama_prima_net * net) const { llama_prima_net_free(net); }
+    };
+    std::unique_ptr<llama_prima_net, prima_net_deleter> prima_net;
+
     llama_model_ptr   model;
     llama_context_ptr context;
 
@@ -1254,6 +1261,16 @@ common_gguf_info common_get_gguf_info(const std::string & fname) {
 
 common_init_result::common_init_result(common_params & params, bool model_only) :
     pimpl(new impl{}) {
+    if (params.n_world > 1 && !model_only) {
+        // prima.cpp: set up the ring, this can change the rank, the world size and the layer windows
+        try {
+            pimpl->prima_net.reset(prima_setup(params));
+        } catch (const std::exception & e) {
+            LOG_ERR("%s: %s\n", __func__, e.what());
+            return;
+        }
+    }
+
     auto mparams = common_model_params_to_llama(params);
     auto cparams = common_context_params_to_llama(params);
 
@@ -1385,6 +1402,8 @@ common_init_result::common_init_result(common_params & params, bool model_only) 
         cparams.samplers   = pimpl->samplers_seq_config.data();
         cparams.n_samplers = pimpl->samplers_seq_config.size();
     }
+
+    cparams.prima_net = pimpl->prima_net.get();
 
     llama_context * lctx = llama_init_from_model(model, cparams);
     if (lctx == NULL) {
@@ -1768,8 +1787,10 @@ struct llama_context_params common_context_params_to_llama(const common_params &
 
     cparams.moe_cache_size = params.moe_cache_size;
 
-    cparams.next_node_ip = params.next_node_ip.c_str();
-    cparams.data_port    = params.data_port;
+    cparams.next_node_ip   = params.next_node_ip.c_str();
+    cparams.data_port      = params.data_port;
+    cparams.prefetch       = params.prefetch;
+    cparams.prefetch_force = params.force;
 
     return cparams;
 }

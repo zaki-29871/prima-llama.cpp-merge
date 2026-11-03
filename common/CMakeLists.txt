@@ -103,6 +103,9 @@ add_library(${TARGET}
     peg-parser.h
     preset.cpp
     preset.h
+    prima-profiler.cpp
+    prima.cpp
+    prima.h
     reasoning-budget.cpp
     reasoning-budget.h
     sampling.cpp

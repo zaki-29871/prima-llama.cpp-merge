@@ -61,6 +61,7 @@ extern "C" {
     struct llama_vocab;
     struct llama_model;
     struct llama_context;
+    struct llama_prima_net;
     struct llama_sampler;
 
     typedef struct llama_memory_i * llama_memory_t;
@@ -432,8 +433,11 @@ extern "C" {
         struct llama_context * ctx_other;
 
         // prima.cpp piped-ring parallelism, used when the model has n_world > 1
-        const char * next_node_ip; // ip address of the next node in the ring
-        uint32_t     data_port;    // base data port, node r listens on data_port + r
+        struct llama_prima_net * prima_net; // ring connection from llama_prima_net_init, not owned, NULL = create one from the fields below
+        const char * next_node_ip;          // ip address of the next node in the ring
+        uint32_t     data_port;             // base data port, node r listens on data_port + r
+        bool         prefetch;              // prefetch the weights of the next layer window while other nodes compute
+        bool         prefetch_force;        // also touch the prefetched pages
     };
 
     struct llama_model_tensor_override {
@@ -819,6 +823,27 @@ extern "C" {
     // Blocks until the master node frees its context
     // Returns 0 on normal stop, < 0 on error
     LLAMA_API int32_t llama_prima_worker_run(struct llama_context * ctx);
+
+    // Ring connection, used to set up the ring before the model is loaded and then passed to the context
+    // Listens on listen_port and sends to next_ip:next_port. Returns NULL on error
+    LLAMA_API struct llama_prima_net * llama_prima_net_init(uint32_t listen_port, const char * next_ip, uint32_t next_port);
+    LLAMA_API void llama_prima_net_free(struct llama_prima_net * net);
+
+    // Send a setup message to the next node. Returns 0 on success
+    LLAMA_API int32_t llama_prima_net_send(struct llama_prima_net * net, const void * data, size_t size);
+
+    // Receive a setup message from the previous node into buf (blocking)
+    // Returns the message size, or -1 on error or if the message is larger than size
+    LLAMA_API int64_t llama_prima_net_recv(struct llama_prima_net * net, void * buf, size_t size);
+
+    // Send to another next node from now on. Returns 0 on success
+    LLAMA_API int32_t llama_prima_net_set_next(struct llama_prima_net * net, const char * ip, uint32_t port);
+
+    // Forward all messages to the next node until the master stops the ring. Returns 0 on normal stop
+    LLAMA_API int32_t llama_prima_net_forward(struct llama_prima_net * net);
+
+    // Check if a TCP port accepts connections
+    LLAMA_API bool llama_prima_port_open(const char * ip, uint32_t port, int32_t timeout_ms);
 
     // Returns the smallest position present in the memory for the specified sequence
     // This is typically non-zero only for SWA caches

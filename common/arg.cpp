@@ -4908,7 +4908,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         [](common_params & params) {
             params.prefetch = true;
         }
-    ).set_env("LLAMA_ARG_UNLOAD"));
+    ).set_env("LLAMA_ARG_PREFETCH"));
 #ifdef GGML_USE_CUDA
     add_opt(common_arg(
         {"--keep-out-in-cuda"},

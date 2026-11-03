@@ -520,12 +520,23 @@ llama_context::llama_context(
         }
 
         if (!model.no_alloc()) {
-            const char * next_ip = params.next_node_ip ? params.next_node_ip : "127.0.0.1";
+            if (params.prima_net) {
+                pp_net = params.prima_net;
+            } else {
+                const char * next_ip = params.next_node_ip ? params.next_node_ip : "127.0.0.1";
+                const uint32_t next_rank = (model.pp_rank + 1) % model.pp_n_world;
 
-            pp_net = std::make_unique<llama_prima_net>(model.pp_n_world, model.pp_rank, next_ip, params.data_port);
+                pp_net_owned = std::make_unique<llama_prima_net>(params.data_port + model.pp_rank, next_ip, params.data_port + next_rank);
+                pp_net = pp_net_owned.get();
+            }
 
             if (model.pp_rank == 0) {
-                llama_prima_mem_register(memory.get(), pp_net.get());
+                llama_prima_mem_register(memory.get(), pp_net);
+            }
+
+            if (params.prefetch) {
+                pp_prefetch_force = params.prefetch_force;
+                pp_init_prefetch();
             }
         }
 
@@ -1670,6 +1681,64 @@ void llama_context::pp_get_hidden(llm_graph_result * res, uint32_t n_tokens, std
     ggml_backend_sched_synchronize(sched.get());
 }
 
+void llama_context::pp_init_prefetch() {
+    const auto & windows = model.pp_windows;
+    const uint32_t rank  = model.pp_rank;
+
+    std::vector<std::vector<ggml_tensor *>> tensors(windows.size());
+
+    auto window_of_layer = [&](int il) -> int {
+        for (size_t iw = 0; iw < windows.size(); ++iw) {
+            if (il >= windows[iw].il0 && il < windows[iw].il1) {
+                return (int) iw;
+            }
+        }
+        return -1;
+    };
+
+    for (const auto & [name, t] : model.tensors_by_name) {
+        int il = -1;
+        if (sscanf(name.c_str(), "blk.%d.", &il) == 1) {
+            const int iw = window_of_layer(il);
+            if (iw >= 0 && windows[iw].rank == rank) {
+                tensors[iw].push_back(t);
+            }
+        } else if (rank == 0 && name.rfind("token_embd.", 0) != 0) {
+            // the output head runs with the last window of the master
+            tensors.back().push_back(t);
+        }
+    }
+
+    size_t n_bytes = 0;
+
+    pp_segs.resize(windows.size());
+    for (size_t iw = 0; iw < windows.size(); ++iw) {
+        pp_segs[iw] = llama_prima_make_segments(tensors[iw]);
+        for (const auto & seg : pp_segs[iw]) {
+            n_bytes += seg.end - seg.start;
+        }
+    }
+
+    LLAMA_LOG_INFO("%s: prefetch %.2f MiB of host weights per token (force = %d)\n", __func__, n_bytes/1024.0/1024.0, pp_prefetch_force);
+}
+
+void llama_context::pp_prefetch_after(uint32_t iw) {
+    if (pp_segs.empty()) {
+        return;
+    }
+
+    const auto & windows = model.pp_windows;
+    const size_t n = windows.size();
+
+    for (size_t k = 1; k <= n; ++k) {
+        const size_t jw = (iw + k) % n;
+        if (windows[jw].rank == model.pp_rank) {
+            llama_prima_prefetch(pp_segs[jw], pp_prefetch_force);
+            return;
+        }
+    }
+}
+
 llm_graph_result * llama_context::pp_process_ubatch(const llama_ubatch & ubatch, llama_memory_context_i * mctx, ggml_status & ret) {
     const auto & windows = model.pp_windows;
 
@@ -1731,6 +1800,10 @@ llm_graph_result * llama_context::pp_process_ubatch(const llama_ubatch & ubatch,
                     data.window = iw + 1;
                     pp_net->send_data(data);
                 }
+
+                if (res) {
+                    pp_prefetch_after(iw);
+                }
             }
         } else {
             if (n_tokens != pp_meta.n_tokens()) {
@@ -1775,6 +1848,8 @@ llm_graph_result * llama_context::pp_process_ubatch(const llama_ubatch & ubatch,
                     std::copy_n(hidden.data() + i*n_embd, n_embd, out.hidden.data() + idx(i)*n_embd);
                 }
                 pp_net->send_data(out);
+
+                pp_prefetch_after(iw);
             }
         }
     } catch (const std::exception & e) {
@@ -1820,9 +1895,8 @@ int32_t llama_context::pp_worker_run() {
             switch (pp_net->recv(data, ops)) {
                 case LLAMA_PRIMA_MSG_STOP:
                     {
-                        if (forward) {
-                            pp_net->send_stop();
-                        }
+                        // always forward the stop, forwarder nodes between this node and the master wait for it
+                        pp_net->send_stop();
                         LLAMA_LOG_INFO("%s: rank %u received stop\n", __func__, rank);
                         return 0;
                     }
@@ -4325,8 +4399,11 @@ llama_context_params llama_context_default_params() {
         /*.sampler                     =*/ nullptr,
         /*.n_sampler                   =*/ 0,
         /*.ctx_other                   =*/ nullptr,
+        /*.prima_net                   =*/ nullptr,
         /*.next_node_ip                =*/ "127.0.0.1",
         /*.data_port                   =*/ 9000,
+        /*.prefetch                    =*/ false,
+        /*.prefetch_force              =*/ false,
     };
 
     return result;

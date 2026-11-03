@@ -1686,6 +1686,23 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
     const int act_gpu_layers = devices.empty() ? 0 : std::min(n_gpu_layers, n_layer_all + 1);
     auto get_layer_buft_list = [&](int il) -> llama_model::impl::layer_dev {
         const bool is_swa = il < n_layer_all && hparams.is_swa(il);
+        if (pp_enabled()) {
+            // prima.cpp: n_gpu_layers is per window, the last n_gpu_layers layers of each window go to the GPU
+            // the output layer goes to the GPU if the whole last window of the master is on the GPU
+            const auto & w = il < n_layer_all ? pp_window_of_layer(il) : pp_windows.back();
+            const int n_win = w.il1 - w.il0;
+            const int n_gpu = devices.empty() ? 0 : std::min(n_gpu_layers, n_win);
+            const int i_loc = il < n_layer_all ? il - w.il0 : n_win - 1;
+            const bool on_gpu = il < n_layer_all ? i_loc >= n_win - n_gpu : n_gpu >= n_win;
+            if (!on_gpu) {
+                LLAMA_LOG_DEBUG("load_tensors: layer %3d assigned to device %s, is_swa = %d\n", il, ggml_backend_dev_name(cpu_dev), is_swa);
+                return {cpu_dev, &pimpl->cpu_buft_list};
+            }
+            const int layer_gpu = std::upper_bound(splits.begin(), splits.begin() + n_devices(), float(i_loc - (n_win - n_gpu))/n_gpu) - splits.begin();
+            auto * dev = devices.at(std::min<size_t>(layer_gpu, n_devices() - 1)).dev;
+            LLAMA_LOG_DEBUG("load_tensors: layer %3d assigned to device %s, is_swa = %d\n", il, ggml_backend_dev_name(dev), is_swa);
+            return {dev, &pimpl->gpu_buft_list.at(dev)};
+        }
         if (il < i_gpu_start || (il - i_gpu_start) >= act_gpu_layers) {
             LLAMA_LOG_DEBUG("load_tensors: layer %3d assigned to device %s, is_swa = %d\n", il, ggml_backend_dev_name(cpu_dev), is_swa);
             return {cpu_dev, &pimpl->cpu_buft_list};
@@ -1905,7 +1922,8 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
     // per-tensor activation precision policy
     prec_policy.load(ml, *this);
 
-    ml.init_mappings(true, use_mlock ? &pimpl->mlock_mmaps : nullptr);
+    // prima.cpp: do not read the whole file, this node uses only the pages of its own layers
+    ml.init_mappings(!pp_enabled(), use_mlock ? &pimpl->mlock_mmaps : nullptr);
     pimpl->mappings.reserve(ml.mappings.size());
 
     // create the backend buffers
@@ -2454,6 +2472,15 @@ void llama_model::pp_init() {
         }
     }
     LLAMA_LOG_INFO("%s: rank %u/%u, %zu windows in total, my layers:%s\n", __func__, pp_rank, pp_n_world, pp_windows.size(), desc.c_str());
+}
+
+const llama_prima_window & llama_model::pp_window_of_layer(int il) const {
+    for (const auto & w : pp_windows) {
+        if (il >= w.il0 && il < w.il1) {
+            return w;
+        }
+    }
+    GGML_ABORT("prima: layer %d is not in any window", il);
 }
 
 bool llama_model::pp_owns_layer(int il) const {

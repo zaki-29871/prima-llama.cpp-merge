@@ -10,8 +10,10 @@
 
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
+struct ggml_tensor;
 struct llama_memory_i;
 
 struct llama_prima_window {
@@ -28,6 +30,7 @@ enum llama_prima_msg_type : uint32_t {
     LLAMA_PRIMA_MSG_DATA = 1, // hidden state of a ubatch
     LLAMA_PRIMA_MSG_OPS  = 2, // memory operations
     LLAMA_PRIMA_MSG_STOP = 3,
+    LLAMA_PRIMA_MSG_CTL  = 4, // setup messages (device info, layer setup, topology)
 };
 
 enum llama_prima_op_type : int32_t {
@@ -65,27 +68,39 @@ struct llama_prima_data {
     uint32_t n_tokens() const { return (uint32_t) n_seq_id.size(); }
 };
 
-class llama_prima_net {
+struct llama_prima_net {
 public:
-    llama_prima_net(uint32_t n_world, uint32_t rank, const std::string & next_ip, uint32_t data_port);
+    // listen on listen_port, send to next_ip:next_port
+    llama_prima_net(uint32_t listen_port, const std::string & next_ip, uint32_t next_port);
     ~llama_prima_net();
 
     void send_data(const llama_prima_data & data);
     void send_ops (const std::vector<llama_prima_op> & ops);
     void send_stop();
+    void send_ctl (const void * data, size_t size);
 
     // blocking, returns the message type
     llama_prima_msg_type recv(llama_prima_data & data, std::vector<llama_prima_op> & ops);
+
+    // blocking, throws if the message is not a setup message
+    std::vector<uint8_t> recv_ctl();
+
+    // connect to another next node, pending messages on the old connection still go out
+    void set_next(const std::string & ip, uint32_t port);
+
+    // forward all messages to the next node until a stop message passes
+    void forward();
 
     // record a memory op on the master, sent before the next ubatch
     void record(const llama_prima_op & op) { pending.push_back(op); }
     void flush_ops();
 
-    const uint32_t n_world;
-    const uint32_t rank;
+    // check if a TCP port accepts connections
+    static bool port_open(const std::string & ip, uint32_t port, int timeout_ms);
 
 private:
     void send_parts(const std::vector<std::pair<const void *, size_t>> & parts);
+    std::vector<std::vector<uint8_t>> recv_parts();
 
     void * zctx      = nullptr;
     void * sock_send = nullptr;
@@ -93,6 +108,21 @@ private:
 
     std::vector<llama_prima_op> pending;
 };
+
+//
+// weight prefetching
+//
+
+struct llama_prima_segment {
+    uintptr_t start;
+    uintptr_t end;
+};
+
+// page aligned and merged memory ranges of the host tensors
+std::vector<llama_prima_segment> llama_prima_make_segments(const std::vector<ggml_tensor *> & tensors);
+
+// ask the OS to load the pages, with force the pages are also touched
+void llama_prima_prefetch(const std::vector<llama_prima_segment> & segs, bool force);
 
 // the master registers its memory so that the llama_memory_* API forwards the ops to the ring
 void llama_prima_mem_register  (const llama_memory_i * mem, llama_prima_net * net);

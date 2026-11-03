@@ -922,6 +922,7 @@ struct llama_model {
 
     bool pp_enabled() const { return pp_n_world > 1; }
     bool pp_owns_layer(int il) const;
+    const llama_prima_window & pp_window_of_layer(int il) const;
     void pp_init();
 
     virtual void load_stats  (llama_model_loader & ml) = 0;

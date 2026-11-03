@@ -320,7 +320,15 @@ private:
     llama_memory_ptr memory;
 
     // prima.cpp piped-ring parallelism
-    std::unique_ptr<llama_prima_net> pp_net;
+    std::unique_ptr<llama_prima_net> pp_net_owned;
+    llama_prima_net * pp_net = nullptr; // pp_net_owned or the net from the context params
+
+    // prefetch: memory ranges of the weights of each window of this node, indexed by window
+    std::vector<std::vector<llama_prima_segment>> pp_segs;
+    bool pp_prefetch_force = false;
+
+    void pp_init_prefetch();
+    void pp_prefetch_after(uint32_t iw); // prefetch the next window of this node after window iw
 
     llama_prima_data pp_meta;   // worker: layout of the ubatch being processed, in the master order
     std::vector<float> pp_buf;  // input hidden state of the current window
