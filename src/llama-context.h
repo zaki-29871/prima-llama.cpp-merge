@@ -8,6 +8,7 @@
 #include "llama-impl.h"
 #include "llama-memory.h"
 #include "llama-moe-cache.h"
+#include "llama-prima.h"
 
 #include "ggml-cpp.h"
 #include "ggml-opt.h"
@@ -143,7 +144,17 @@ struct llama_context {
                 const llama_ubatch & ubatch,
                     llm_graph_type   gtype,
             llama_memory_context_i * mctx,
+                       ggml_status & ret,
+                              bool   apply_mctx = true);
+
+    // prima.cpp: process a ubatch through all windows of this node, exchanging the hidden states with the ring
+    llm_graph_result * pp_process_ubatch(
+                const llama_ubatch & ubatch,
+            llama_memory_context_i * mctx,
                        ggml_status & ret);
+
+    // prima.cpp: worker loop for nodes with rank > 0
+    int32_t pp_worker_run();
 
     int encode(const llama_batch_ext & batch_inp);
     int decode(const llama_batch_ext & batch_inp);
@@ -307,6 +318,17 @@ private:
     llama_cross cross; // TODO: tmp for handling cross-attention - need something better probably
 
     llama_memory_ptr memory;
+
+    // prima.cpp piped-ring parallelism
+    std::unique_ptr<llama_prima_net> pp_net;
+
+    llama_prima_data pp_meta;   // worker: layout of the ubatch being processed, in the master order
+    std::vector<float> pp_buf;  // input hidden state of the current window
+
+    void pp_set_window(int32_t il0, int32_t il1, bool inp_hidden);
+
+    // copy the hidden state from the graph output, rows in ubatch order
+    void pp_get_hidden(llm_graph_result * res, uint32_t n_tokens, std::vector<float> & dst);
     llama_moe_cache_ptr moe_cache;
 
     // decode output (2-dimensional array: [n_outputs][n_vocab])

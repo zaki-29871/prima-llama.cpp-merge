@@ -69,4 +69,9 @@ struct llama_cparams {
     void * cb_eval_user_data;
 
     llama_context * ctx_other;
+
+    // prima.cpp: the window of layers in the next graph, pp_il1 < 0 means all layers
+    int32_t pp_il0        = 0;
+    int32_t pp_il1        = -1;
+    bool    pp_inp_hidden = false; // the graph input is the hidden state from the previous window
 };

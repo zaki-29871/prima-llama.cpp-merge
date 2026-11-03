@@ -171,6 +171,25 @@ static const llm_fused_op_probe llm_fused_op_top_k_mask_probe = {
     /*.n_tokens_per_seq =*/ 1,
 };
 
+// prima.cpp: the master reserves with its last window, which includes the output head
+// a worker reserves with its first window, all its windows have the same size
+static const llama_prima_window & pp_reserve_window(const llama_model & model) {
+    const auto & windows = model.pp_windows;
+    GGML_ASSERT(!windows.empty());
+
+    if (model.pp_rank == 0) {
+        return windows.back();
+    }
+
+    for (const auto & w : windows) {
+        if (w.rank == model.pp_rank) {
+            return w;
+        }
+    }
+
+    GGML_ABORT("prima: no window for rank %u", model.pp_rank);
+}
+
 llama_context::llama_context(
         const llama_model & model,
               llama_context_params params) :
@@ -495,6 +514,26 @@ llama_context::llama_context(
         memory.reset(model.create_memory(params_mem, cparams));
     }
 
+    if (model.pp_enabled() && !hparams.vocab_only) {
+        if (cparams.embeddings || cparams.ctx_type != LLAMA_CONTEXT_TYPE_DEFAULT || hparams.n_pos_per_embd() != 1) {
+            throw std::runtime_error("prima: distributed inference supports only plain text generation contexts");
+        }
+
+        if (!model.no_alloc()) {
+            const char * next_ip = params.next_node_ip ? params.next_node_ip : "127.0.0.1";
+
+            pp_net = std::make_unique<llama_prima_net>(model.pp_n_world, model.pp_rank, next_ip, params.data_port);
+
+            if (model.pp_rank == 0) {
+                llama_prima_mem_register(memory.get(), pp_net.get());
+            }
+        }
+
+        // reserve the compute buffers with the largest graph of this node
+        const auto & w = pp_reserve_window(model);
+        pp_set_window(w.il0, w.il1, true);
+    }
+
     // init backends
     if (!hparams.vocab_only) {
         LLAMA_LOG_DEBUG("%s: enumerating backends\n", __func__);
@@ -584,6 +623,15 @@ llama_context::llama_context(
 }
 
 llama_context::~llama_context() {
+    if (pp_net && model.pp_rank == 0) {
+        llama_prima_mem_unregister(memory.get());
+        try {
+            pp_net->send_stop();
+        } catch (const std::exception & e) {
+            LLAMA_LOG_WARN("%s: failed to stop the ring: %s\n", __func__, e.what());
+        }
+    }
+
     // wait for any pending asynchronous copies into the output buffers before they are freed
     synchronize();
 
@@ -1522,8 +1570,8 @@ bool llama_context::set_adapter_cvec(
     return res;
 }
 
-llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, llm_graph_type gtype, llama_memory_context_i * mctx, ggml_status & ret) {
-    if (mctx && !mctx->apply()) {
+llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, llm_graph_type gtype, llama_memory_context_i * mctx, ggml_status & ret, bool apply_mctx) {
+    if (mctx && apply_mctx && !mctx->apply()) {
         LLAMA_LOG_ERROR("%s: failed to apply memory context\n", __func__);
         ret = GGML_STATUS_FAILED;
         return nullptr;
@@ -1595,6 +1643,245 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
     ret = GGML_STATUS_SUCCESS;
 
     return res;
+}
+
+//
+// prima.cpp piped-ring parallelism
+//
+
+void llama_context::pp_set_window(int32_t il0, int32_t il1, bool inp_hidden) {
+    cparams.pp_il0        = il0;
+    cparams.pp_il1        = il1;
+    cparams.pp_inp_hidden = inp_hidden;
+}
+
+void llama_context::pp_get_hidden(llm_graph_result * res, uint32_t n_tokens, std::vector<float> & dst) {
+    const int64_t n_embd = model.hparams.n_embd;
+
+    ggml_tensor * t = res->get_embd();
+    GGML_ASSERT(t != nullptr && t->type == GGML_TYPE_F32);
+    GGML_ASSERT(t->ne[0] == n_embd && t->ne[1] == (int64_t) n_tokens);
+
+    ggml_backend_t backend = ggml_backend_sched_get_tensor_backend(sched.get(), t);
+    GGML_ASSERT(backend != nullptr);
+
+    dst.resize((size_t) n_embd*n_tokens);
+    ggml_backend_tensor_get_async(backend, t, dst.data(), 0, dst.size()*sizeof(float));
+    ggml_backend_sched_synchronize(sched.get());
+}
+
+llm_graph_result * llama_context::pp_process_ubatch(const llama_ubatch & ubatch, llama_memory_context_i * mctx, ggml_status & ret) {
+    const auto & windows = model.pp_windows;
+
+    const uint32_t rank     = model.pp_rank;
+    const uint32_t n_tokens = ubatch.n_tokens;
+    const size_t   n_embd   = model.hparams.n_embd;
+
+    const auto gtype = ctx_type_to_graph_type(cparams.ctx_type);
+
+    // the windows after the first one take the hidden state as input
+    llama_ubatch ubatch_h = ubatch;
+    ubatch_h.token = nullptr;
+    ubatch_h.type  = nullptr;
+
+    llm_graph_result * res = nullptr;
+
+    llama_prima_data data;
+    std::vector<llama_prima_op> ops;
+
+    auto recv_data = [&](uint32_t iw) {
+        if (pp_net->recv(data, ops) != LLAMA_PRIMA_MSG_DATA || data.window != iw || data.n_tokens() != n_tokens || data.n_embd != n_embd) {
+            throw std::runtime_error(format("prima: unexpected message while waiting for the input of window %u", iw));
+        }
+    };
+
+    try {
+        if (rank == 0) {
+            data.n_embd = n_embd;
+            data.pos     .assign(ubatch.pos,      ubatch.pos      + n_tokens);
+            data.n_seq_id.assign(ubatch.n_seq_id, ubatch.n_seq_id + n_tokens);
+            data.output  .assign(ubatch.output,   ubatch.output   + n_tokens);
+            for (uint32_t i = 0; i < n_tokens; ++i) {
+                data.seq_id.insert(data.seq_id.end(), ubatch.seq_id[i], ubatch.seq_id[i] + ubatch.n_seq_id[i]);
+            }
+
+            // input embeddings, then start the ring
+            pp_set_window(0, 0, false);
+            res = process_ubatch(ubatch, gtype, mctx, ret);
+            if (res) {
+                pp_get_hidden(res, n_tokens, data.hidden);
+                data.window = 0;
+                pp_net->send_data(data);
+            }
+
+            for (uint32_t iw = 0; res && iw < windows.size(); ++iw) {
+                if (windows[iw].rank != rank) {
+                    continue;
+                }
+
+                recv_data(iw);
+                pp_buf.swap(data.hidden);
+                ubatch_h.embd = pp_buf.data();
+
+                pp_set_window(windows[iw].il0, windows[iw].il1, true);
+                res = process_ubatch(ubatch_h, gtype, mctx, ret, false);
+
+                if (res && iw + 1 < windows.size()) {
+                    pp_get_hidden(res, n_tokens, data.hidden);
+                    data.window = iw + 1;
+                    pp_net->send_data(data);
+                }
+            }
+        } else {
+            if (n_tokens != pp_meta.n_tokens()) {
+                throw std::runtime_error("prima: the worker split the ubatch, use the same batch sizes on all nodes");
+            }
+
+            // row i of the ubatch is row idx(i) of the master ubatch
+            const auto * batch_idxs = ubatch.data && ubatch.data->batch_idxs.size() == n_tokens ? ubatch.data->batch_idxs.data() : nullptr;
+            auto idx = [&](uint32_t i) -> size_t { return batch_idxs ? batch_idxs[i] : i; };
+
+            std::vector<float> hidden;
+
+            bool first = true;
+            for (uint32_t iw = 0; iw < windows.size(); ++iw) {
+                if (windows[iw].rank != rank) {
+                    continue;
+                }
+
+                // the input of the first window is already in the ubatch
+                if (!first) {
+                    recv_data(iw);
+                    pp_buf.resize(n_embd*n_tokens);
+                    for (uint32_t i = 0; i < n_tokens; ++i) {
+                        std::copy_n(data.hidden.data() + idx(i)*n_embd, n_embd, pp_buf.data() + i*n_embd);
+                    }
+                    ubatch_h.embd = pp_buf.data();
+                }
+
+                pp_set_window(windows[iw].il0, windows[iw].il1, true);
+                res = process_ubatch(first ? ubatch : ubatch_h, gtype, mctx, ret, first);
+                first = false;
+                if (!res) {
+                    break;
+                }
+
+                pp_get_hidden(res, n_tokens, hidden);
+
+                llama_prima_data out = pp_meta;
+                out.window = iw + 1;
+                out.hidden.resize(n_embd*n_tokens);
+                for (uint32_t i = 0; i < n_tokens; ++i) {
+                    std::copy_n(hidden.data() + i*n_embd, n_embd, out.hidden.data() + idx(i)*n_embd);
+                }
+                pp_net->send_data(out);
+            }
+        }
+    } catch (const std::exception & e) {
+        LLAMA_LOG_ERROR("%s: %s\n", __func__, e.what());
+        ret = GGML_STATUS_FAILED;
+        res = nullptr;
+    }
+
+    const auto & w = pp_reserve_window(model);
+    pp_set_window(w.il0, w.il1, true);
+
+    return res;
+}
+
+int32_t llama_context::pp_worker_run() {
+    if (!pp_net || model.pp_rank == 0) {
+        LLAMA_LOG_ERROR("%s: the worker loop runs only on nodes with rank > 0\n", __func__);
+        return -1;
+    }
+
+    const auto & windows = model.pp_windows;
+
+    const uint32_t rank   = model.pp_rank;
+    const size_t   n_embd = model.hparams.n_embd;
+
+    // the master is the end of the ring for the control messages
+    const bool forward = (rank + 1) % model.pp_n_world != 0;
+
+    uint32_t first_window = 0;
+    while (windows[first_window].rank != rank) {
+        first_window++;
+    }
+
+    LLAMA_LOG_INFO("%s: rank %u is waiting for work\n", __func__, rank);
+
+    llama_batch_ext batch(this);
+
+    try {
+        while (true) {
+            llama_prima_data data;
+            std::vector<llama_prima_op> ops;
+
+            switch (pp_net->recv(data, ops)) {
+                case LLAMA_PRIMA_MSG_STOP:
+                    {
+                        if (forward) {
+                            pp_net->send_stop();
+                        }
+                        LLAMA_LOG_INFO("%s: rank %u received stop\n", __func__, rank);
+                        return 0;
+                    }
+                case LLAMA_PRIMA_MSG_OPS:
+                    {
+                        if (forward) {
+                            pp_net->send_ops(ops);
+                        }
+                        for (const auto & op : ops) {
+                            llama_prima_op_apply(memory.get(), op);
+                        }
+                    } break;
+                case LLAMA_PRIMA_MSG_DATA:
+                    {
+                        if (data.window != first_window || data.n_embd != n_embd) {
+                            throw std::runtime_error(format("prima: got data for window %u, expected window %u", data.window, first_window));
+                        }
+
+                        batch.clear();
+
+                        size_t k = 0;
+                        for (uint32_t i = 0; i < data.n_tokens(); ++i) {
+                            const int32_t n_seq = data.n_seq_id[i];
+                            if (n_seq < 1 || k + n_seq > data.seq_id.size()) {
+                                throw std::runtime_error("prima: malformed sequence ids");
+                            }
+
+                            const int32_t id = batch.add_token(data.seq_id[k]);
+                            bool ok = id >= 0;
+                            for (int32_t s = 1; ok && s < n_seq; ++s) {
+                                ok = batch.add_seq(id, data.seq_id[k + s]);
+                            }
+                            k += n_seq;
+
+                            ok = ok && batch.set_token_embd(id, { data.hidden.data() + i*n_embd, 1, n_embd });
+                            ok = ok && batch.set_token_pos (id, &data.pos[i]);
+                            ok = ok && batch.set_output    (id, data.output[i] != 0);
+                            if (!ok) {
+                                throw std::runtime_error("prima: failed to build the batch, use the same batch sizes and parallel slots on all nodes");
+                            }
+                        }
+
+                        data.hidden.clear();
+                        pp_meta = std::move(data);
+
+                        const int ret = decode(batch);
+                        if (ret != 0) {
+                            throw std::runtime_error(format("prima: decode failed, ret = %d", ret));
+                        }
+                    } break;
+                default:
+                    throw std::runtime_error("prima: unexpected message type");
+            }
+        }
+    } catch (const std::exception & e) {
+        LLAMA_LOG_ERROR("%s: %s\n", __func__, e.what());
+    }
+
+    return -1;
 }
 
 int llama_context::encode(const llama_batch_ext & batch_inp) {
@@ -1996,6 +2283,10 @@ int llama_context::decode(const llama_batch_ext & batch_inp) {
     int64_t n_outputs_prev = 0;
     int64_t n_tokens_prev  = 0;
 
+    if (pp_net && model.pp_rank == 0) {
+        pp_net->flush_ops();
+    }
+
     do {
         const auto & ubatch = mctx->get_ubatch();
 
@@ -2017,7 +2308,9 @@ int llama_context::decode(const llama_batch_ext & batch_inp) {
 
         ggml_status status;
 
-        const auto * res = process_ubatch(ubatch, ctx_type_to_graph_type(cparams.ctx_type), mctx.get(), status);
+        const auto * res = pp_net
+            ? pp_process_ubatch(ubatch, mctx.get(), status)
+            : process_ubatch(ubatch, ctx_type_to_graph_type(cparams.ctx_type), mctx.get(), status);
 
         if (!res) {
             // the last ubatch failed or was aborted -> remove all positions of that ubatch from the memory module
@@ -4032,6 +4325,8 @@ llama_context_params llama_context_default_params() {
         /*.sampler                     =*/ nullptr,
         /*.n_sampler                   =*/ 0,
         /*.ctx_other                   =*/ nullptr,
+        /*.next_node_ip                =*/ "127.0.0.1",
+        /*.data_port                   =*/ 9000,
     };
 
     return result;
@@ -4407,6 +4702,8 @@ void llama_memory_clear(llama_memory_t mem, bool data) {
     }
 
     mem->clear(data);
+
+    llama_prima_mem_record(mem, { LLAMA_PRIMA_OP_CLEAR, 0, 0, 0, 0, data });
 }
 
 bool llama_memory_seq_rm(
@@ -4418,7 +4715,12 @@ bool llama_memory_seq_rm(
         return true;
     }
 
-    return mem->seq_rm(seq_id, p0, p1);
+    const bool res = mem->seq_rm(seq_id, p0, p1);
+    if (res) {
+        llama_prima_mem_record(mem, { LLAMA_PRIMA_OP_SEQ_RM, seq_id, 0, p0, p1, 0 });
+    }
+
+    return res;
 }
 
 void llama_memory_seq_cp(
@@ -4432,6 +4734,8 @@ void llama_memory_seq_cp(
     }
 
     mem->seq_cp(seq_id_src, seq_id_dst, p0, p1);
+
+    llama_prima_mem_record(mem, { LLAMA_PRIMA_OP_SEQ_CP, seq_id_src, seq_id_dst, p0, p1, 0 });
 }
 
 void llama_memory_seq_keep(
@@ -4442,6 +4746,8 @@ void llama_memory_seq_keep(
     }
 
     mem->seq_keep(seq_id);
+
+    llama_prima_mem_record(mem, { LLAMA_PRIMA_OP_SEQ_KEEP, seq_id, 0, 0, 0, 0 });
 }
 
 void llama_memory_seq_add(
@@ -4455,6 +4761,8 @@ void llama_memory_seq_add(
     }
 
     mem->seq_add(seq_id, p0, p1, delta);
+
+    llama_prima_mem_record(mem, { LLAMA_PRIMA_OP_SEQ_ADD, seq_id, 0, p0, p1, delta });
 }
 
 void llama_memory_seq_div(
@@ -4468,6 +4776,8 @@ void llama_memory_seq_div(
     }
 
     mem->seq_div(seq_id, p0, p1, d);
+
+    llama_prima_mem_record(mem, { LLAMA_PRIMA_OP_SEQ_DIV, seq_id, 0, p0, p1, d });
 }
 
 llama_pos llama_memory_seq_pos_min(
@@ -4715,6 +5025,10 @@ void llama_opt_epoch(
         idata_split,
         callback_train,
         callback_eval);
+}
+
+int32_t llama_prima_worker_run(llama_context * ctx) {
+    return ctx->pp_worker_run();
 }
 
 int32_t llama_process(llama_context * ctx, llama_process_type type, llama_batch_ext * batch) {

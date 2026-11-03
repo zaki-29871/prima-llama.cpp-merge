@@ -5,6 +5,7 @@
 #include "llama-graph.h"
 #include "llama-hparams.h"
 #include "llama-memory.h"
+#include "llama-prima.h"
 #include "llama-vocab.h"
 
 #include <map>
@@ -912,6 +913,16 @@ struct llama_model {
     llama_memory_i * create_memory(const llama_memory_params & params, const llama_cparams & cparams) const;
 
     ggml_cgraph * build_graph(const llm_graph_params & params) const;
+
+    // prima.cpp piped-ring parallelism
+    uint32_t pp_n_world = 1;
+    uint32_t pp_rank    = 0;
+
+    std::vector<llama_prima_window> pp_windows; // empty if not distributed
+
+    bool pp_enabled() const { return pp_n_world > 1; }
+    bool pp_owns_layer(int il) const;
+    void pp_init();
 
     virtual void load_stats  (llama_model_loader & ml) = 0;
     virtual void load_hparams(llama_model_loader & ml) = 0;

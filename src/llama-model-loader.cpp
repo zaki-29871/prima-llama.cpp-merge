@@ -1185,6 +1185,18 @@ struct ggml_tensor * llama_model_loader::create_tensor(
         }
 
         // skip unused tensors
+        if (flags & TENSOR_NOT_OWNED) {
+            LLAMA_LOG_DEBUG("%s: tensor %s belongs to another node -- skipping\n", __func__, tn.str().c_str());
+
+            // a duplicated tensor is already counted with the original
+            if (!(flags & TENSOR_DUPLICATED)) {
+                size_data -= ggml_nbytes(t_meta);
+                n_created++;
+            }
+
+            return nullptr;
+        }
+
         if (info.op == GGML_OP_NONE || (flags & TENSOR_SKIP)) {
             const size_t nbytes = ggml_nbytes(t_meta);
             LLAMA_LOG_WARN("model has unused tensor %s (size = %zu bytes) -- ignoring\n", tn.str().c_str(), nbytes);
@@ -1300,7 +1312,7 @@ struct ggml_tensor * llama_model_loader::create_tensor(
     };
 
     if (files.empty()) {
-        if (flags & TENSOR_SKIP_IF_VIRTUAL) {
+        if (flags & (TENSOR_SKIP_IF_VIRTUAL | TENSOR_NOT_OWNED)) {
             return nullptr;
         }
         ggml_type type = GGML_TYPE_F32;

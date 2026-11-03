@@ -354,6 +354,11 @@ extern "C" {
         bool no_host;         // bypass host buffer allowing extra buffers to be used
         bool no_alloc;        // only load metadata and simulate memory allocations
         bool load_mtp;        // whether to load MTP layers
+
+        // prima.cpp piped-ring parallelism
+        uint32_t n_world;            // number of nodes in the ring
+        uint32_t rank;               // rank of this node
+        uint32_t n_layer_window[32]; // number of layers per node in each cycle, all zero = even split
     };
 
     struct llama_sampler_seq_config {
@@ -425,6 +430,10 @@ extern "C" {
         // a source/target/parent context
         // can be utilized in various ways, for example by sharing results or llama_memory between 2 contexts
         struct llama_context * ctx_other;
+
+        // prima.cpp piped-ring parallelism, used when the model has n_world > 1
+        const char * next_node_ip; // ip address of the next node in the ring
+        uint32_t     data_port;    // base data port, node r listens on data_port + r
     };
 
     struct llama_model_tensor_override {
@@ -801,6 +810,15 @@ extern "C" {
                  llama_pos p0,
                  llama_pos p1,
                        int d);
+
+    //
+    // prima.cpp piped-ring parallelism
+    //
+
+    // Run the worker loop on a node with rank > 0
+    // Blocks until the master node frees its context
+    // Returns 0 on normal stop, < 0 on error
+    LLAMA_API int32_t llama_prima_worker_run(struct llama_context * ctx);
 
     // Returns the smallest position present in the memory for the specified sequence
     // This is typically non-zero only for SWA caches

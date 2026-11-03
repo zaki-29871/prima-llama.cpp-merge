@@ -1603,6 +1603,8 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
 
     this->ml = &ml; // to be used by create_tensor() and load_arch_tensors()
 
+    pp_init();
+
     if (ml.use_mmap && params.load_mode == LLAMA_LOAD_MODE_AUTO) {
         for (const auto & dev : devices) {
             ggml_backend_dev_props props;
@@ -2397,6 +2399,16 @@ void llama_model_base::load_tensors_hadamard() {
 }
 
 ggml_tensor * llama_model_base::create_tensor(llama_model_loader & ml, const LLM_TN_IMPL & tn, const std::initializer_list<int64_t> & ne, int flags) {
+    if (pp_enabled()) {
+        // the master keeps the input and output layers, the other nodes keep only their own layers
+        const bool owned = tn.bid >= 0
+            ? pp_owns_layer(tn.bid)
+            : pp_rank == 0 || (tn.tensor != LLM_TENSOR_TOKEN_EMBD && tn.tensor != LLM_TENSOR_OUTPUT && tn.tensor != LLM_TENSOR_OUTPUT_NORM);
+        if (!owned) {
+            flags |= llama_model_loader::TENSOR_NOT_OWNED | llama_model_loader::TENSOR_NOT_REQUIRED;
+        }
+    }
+
     const buft_list_t * buft_list_layer = nullptr;
     if (tn.bid != -1) {
         // blocks that are not model layers (e.g. the blocks of a head) go with the output
@@ -2405,6 +2417,55 @@ ggml_tensor * llama_model_base::create_tensor(llama_model_loader & ml, const LLM
     return ml.create_tensor(
         hparams, &pimpl->cpu_buft_list, pimpl->dev_input.buft_list, pimpl->dev_output.buft_list, buft_list_layer,
         tn, ne, flags);
+}
+
+void llama_model::pp_init() {
+    pp_n_world = std::max(1u, params.n_world);
+    pp_rank    = params.rank;
+    pp_windows.clear();
+
+    if (pp_rank >= pp_n_world) {
+        throw std::runtime_error(format("prima: rank %u is out of range for world size %u", pp_rank, pp_n_world));
+    }
+
+    if (!pp_enabled()) {
+        return;
+    }
+
+    switch (arch) {
+        case LLM_ARCH_LLAMA:
+        case LLM_ARCH_QWEN2:
+        case LLM_ARCH_QWEN3:
+            break;
+        default:
+            throw std::runtime_error(format("prima: distributed inference is not supported for arch %s", arch_name().c_str()));
+    }
+
+    if (hparams.n_layer_all != hparams.n_layer()) {
+        throw std::runtime_error("prima: models with nextn/MTP layers are not supported");
+    }
+
+    pp_windows = llama_prima_make_windows(hparams.n_layer(), pp_n_world, params.n_layer_window);
+
+    std::string desc;
+    for (const auto & w : pp_windows) {
+        if (w.rank == pp_rank) {
+            desc += format(" [%d, %d)", w.il0, w.il1);
+        }
+    }
+    LLAMA_LOG_INFO("%s: rank %u/%u, %zu windows in total, my layers:%s\n", __func__, pp_rank, pp_n_world, pp_windows.size(), desc.c_str());
+}
+
+bool llama_model::pp_owns_layer(int il) const {
+    if (!pp_enabled()) {
+        return true;
+    }
+    for (const auto & w : pp_windows) {
+        if (il >= w.il0 && il < w.il1) {
+            return w.rank == pp_rank;
+        }
+    }
+    return false;
 }
 
 std::string llama_model::arch_name() const {
@@ -3268,6 +3329,11 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                         }
                     }
 
+                    if (pp_enabled()) {
+                        // keep the KV cache only for the layers of this node
+                        filter = [this, base = filter](uint32_t il) { return pp_owns_layer(il) && (!base || base(il)); };
+                    }
+
                     if (hparams.swa_type != LLAMA_SWA_TYPE_NONE) {
                         GGML_ASSERT(hparams.is_swa_any());
 
@@ -3393,6 +3459,9 @@ llama_model_params llama_model_default_params() {
         /*.no_host                     =*/ false,
         /*.no_alloc                    =*/ false,
         /*.load_mtp                    =*/ false,
+        /*.n_world                     =*/ 1,
+        /*.rank                        =*/ 0,
+        /*.n_layer_window              =*/ {0},
     };
 
     return result;

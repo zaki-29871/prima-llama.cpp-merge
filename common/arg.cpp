@@ -4910,10 +4910,10 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_env("LLAMA_ARG_UNLOAD"));
 #ifdef GGML_USE_CUDA
-    add_opt(llama_arg(
+    add_opt(common_arg(
         {"--keep-out-in-cuda"},
         format("whether to compute the output layer on CUDA (default: %s)", params.keep_out_in_cuda ? "true" : "false"),
-        [](gpt_params & params) {
+        [](common_params & params) {
             params.keep_out_in_cuda = true;
         }
     ).set_env("LLAMA_ARG_KEEP_INP_OUT_IN_CUDA"));

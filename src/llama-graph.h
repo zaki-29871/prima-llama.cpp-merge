@@ -897,6 +897,12 @@ struct llm_graph_params {
             return false;
         }
 
+        if (cparams.pp_il0        != other.cparams.pp_il0 ||
+            cparams.pp_il1        != other.cparams.pp_il1 ||
+            cparams.pp_inp_hidden != other.cparams.pp_inp_hidden) {
+            return false;
+        }
+
         return
             cparams.embeddings              == other.cparams.embeddings              &&
             cparams.embeddings_nextn        == other.cparams.embeddings_nextn        &&
@@ -1028,6 +1034,10 @@ struct llm_graph_context {
     const int64_t n_embd;
     const int64_t n_layer;
     const int64_t n_layer_nextn;
+
+    // prima.cpp: the layers [pp_il0, pp_il1) are computed by this graph
+    const int32_t pp_il0;
+    const int32_t pp_il1;
     const int64_t n_rot;
     const int64_t n_ctx;       // user-specified context size (can be different from n_ctx_train)
     const int64_t n_head;
@@ -1240,6 +1250,10 @@ struct llm_graph_context {
 
     // tok_scale: applied to token rows only
     ggml_tensor * build_inp_embd(ggml_tensor * tok_embd, float tok_scale = 1.0f) const;
+
+    // prima.cpp: the graph does not reach the output layer, so the hidden state is the graph output
+    bool pp_has_output() const { return pp_il1 == n_layer; }
+    void build_pp_out(ggml_tensor * cur) const;
     ggml_tensor * build_inp_pos() const;
     ggml_tensor * build_inp_attn_scale() const;
     ggml_tensor * build_inp_out_ids() const;

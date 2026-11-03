@@ -172,6 +172,11 @@ int llama_completion(int argc, char ** argv) {
         return 1;
     }
 
+    // workers only serve their layers for the master
+    if (my_rank != 0) {
+        return llama_prima_worker_run(ctx) == 0 ? 0 : 1;
+    }
+
     llama_memory_t mem = llama_get_memory(ctx);
     const llama_vocab * vocab = llama_model_get_vocab(model);
 
@@ -301,7 +306,7 @@ int llama_completion(int argc, char ** argv) {
         // should not run without any tokens
         if (embd_inp.empty()) {
             if (add_bos) {
-                embd_inp.push_back(llama_token_bos(vocab));
+                embd_inp.push_back(llama_vocab_bos(vocab));
                 LOG_WRN("embd_inp was considered empty and bos was added: %s\n", string_from(ctx, embd_inp).c_str());
             } else {
                 LOG_ERR("input is empty\n");

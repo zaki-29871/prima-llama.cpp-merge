@@ -1257,7 +1257,9 @@ common_init_result::common_init_result(common_params & params, bool model_only) 
     auto mparams = common_model_params_to_llama(params);
     auto cparams = common_context_params_to_llama(params);
 
-    if (params.fit_params) {
+    if (params.fit_params && params.n_world > 1) {
+        COM_WRN("%s", "fitting params to device memory is not supported with --world > 1, skipping\n");
+    } else if (params.fit_params) {
         COM_TRC("%s", "fitting params to device memory ...\n");
         COM_TRC("%s", "(for bugs during this step try to reproduce them with -fit off, or provide --verbose logs if the bug only occurs with -fit on)\n");
 
@@ -1505,7 +1507,8 @@ common_init_result_ptr common_init_from_params(common_params & params, bool mode
         common_set_adapter_lora(lctx, params.lora_adapters);
     }
 
-    if (params.warmup) {
+    // in a ring, the master runs the warmup for all nodes
+    if (params.warmup && params.rank == 0) {
         COM_TRC("%s", "warming up the model with an empty run - please wait ... (--no-warmup to disable)\n");
 
         std::vector<llama_token> tmp;
@@ -1720,6 +1723,10 @@ struct llama_model_params common_model_params_to_llama(common_params & params) {
     mparams.no_alloc                    = params.no_alloc;
     mparams.load_mtp                    = params.load_mtp || std::find(params.speculative.types.begin(), params.speculative.types.end(), COMMON_SPECULATIVE_TYPE_DRAFT_MTP) != params.speculative.types.end();
 
+    mparams.n_world = params.n_world;
+    mparams.rank    = params.rank;
+    std::copy(std::begin(params.n_layer_window), std::end(params.n_layer_window), mparams.n_layer_window);
+
     return mparams;
 }
 
@@ -1760,6 +1767,9 @@ struct llama_context_params common_context_params_to_llama(const common_params &
     cparams.type_v = params.cache_type_v;
 
     cparams.moe_cache_size = params.moe_cache_size;
+
+    cparams.next_node_ip = params.next_node_ip.c_str();
+    cparams.data_port    = params.data_port;
 
     return cparams;
 }

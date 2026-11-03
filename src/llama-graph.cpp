@@ -1544,6 +1544,8 @@ llm_graph_context::llm_graph_context(const llm_graph_params & params) :
     n_embd           (hparams.n_embd),
     n_layer          (hparams.n_layer()),
     n_layer_nextn    (hparams.n_layer_nextn),
+    pp_il0           (cparams.pp_il0),
+    pp_il1           (cparams.pp_il1 < 0 ? (int32_t) hparams.n_layer() : cparams.pp_il1),
     n_rot            (hparams.n_rot()),
     n_ctx            (cparams.n_ctx),
     n_head           (hparams.n_head()),
@@ -2637,6 +2639,21 @@ ggml_tensor * llm_graph_context::build_inp_embd(ggml_tensor * tok_embd, float to
     const int64_t n_embd_inp = hparams.n_embd_inp();
     const int64_t n_embd     = hparams.n_embd;
 
+    if (cparams.pp_inp_hidden) {
+        // prima.cpp: the hidden state from the previous window comes in through ubatch.embd
+        auto inp = std::make_unique<llm_graph_input_embd>(n_embd);
+
+        inp->embd = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, n_embd, ubatch.n_tokens);
+        cb(inp->embd, "inp_embd", -1);
+        ggml_set_input(inp->embd);
+
+        ggml_tensor * cur = inp->embd;
+        res->t_inp_embd = cur;
+        res->add_input(std::move(inp));
+
+        return cur;
+    }
+
     assert(n_embd_inp >= n_embd);
 
     auto inp = std::make_unique<llm_graph_input_embd>(n_embd_inp);
@@ -2801,6 +2818,18 @@ ggml_tensor * llm_graph_context::build_inp_embd(ggml_tensor * tok_embd, float to
     ggml_build_forward_expand(gf, cur);
 
     return cur;
+}
+
+void llm_graph_context::build_pp_out(ggml_tensor * cur) const {
+    if (!ggml_is_contiguous(cur)) {
+        cur = ggml_cont(ctx0, cur);
+    }
+    cb(cur, "pp_out", -1);
+
+    res->t_embd   = cur;
+    res->t_logits = nullptr;
+
+    ggml_build_forward_expand(gf, cur);
 }
 
 ggml_tensor * llm_graph_context::build_inp_pos() const {

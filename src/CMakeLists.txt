@@ -37,6 +37,7 @@ set(LLAMA_CORE_SOURCES
     llama-model-loader.cpp
     llama-model-saver.cpp
     llama-model.cpp
+    llama-prima.cpp
     llama-quant.cpp
     llama-sampler.cpp
     llama-vocab.cpp
@@ -70,6 +71,20 @@ target_include_directories(llama PUBLIC ../include)
 target_compile_features   (llama PRIVATE cxx_std_17) # don't bump
 
 target_link_libraries(llama PUBLIC ggml)
+
+if (LLAMA_PRIMA)
+    find_package(PkgConfig QUIET)
+    if (PkgConfig_FOUND)
+        pkg_check_modules(ZMQ IMPORTED_TARGET libzmq)
+    endif()
+    if (ZMQ_FOUND)
+        message(STATUS "prima: ZeroMQ found, distributed inference enabled")
+        target_compile_definitions(llama PRIVATE LLAMA_USE_ZMQ)
+        target_link_libraries(llama PRIVATE PkgConfig::ZMQ)
+    else()
+        message(WARNING "prima: ZeroMQ (libzmq) not found, distributed inference disabled")
+    endif()
+endif()
 
 if (BUILD_SHARED_LIBS)
     set_target_properties(llama PROPERTIES POSITION_INDEPENDENT_CODE ON)
