@@ -145,6 +145,7 @@ option(LLAMA_TESTS_INSTALL "llama: install tests" ON)
 option(LLAMA_OPENSSL    "llama: use openssl to support HTTPS" ON)
 option(LLAMA_SUBPROCESS "llama-common: use subprocess, required by server tools and server router mode" ${LLAMA_SUBPROCESS_DEFAULT})
 option(LLAMA_PRIMA      "llama: enable prima.cpp distributed inference (requires libzmq)" ON)
+option(LLAMA_PRIMA_HIGHS "llama: use the HiGHS solver for prima.cpp layer assignment (USE_HIGHS=1 in the prima.cpp Makefile)" OFF)
 option(LLAMA_LLGUIDANCE "llama-common: include LLGuidance library for structured output in common utils" OFF)
 
 
@@ -227,6 +228,87 @@ if (NOT TARGET ggml AND NOT LLAMA_USE_SYSTEM_GGML)
 endif()
 
 #
+# prima.cpp dependencies (ported from prima.cpp/Makefile)
+#
+# Makefile                                     -> CMake
+#   -isystem /usr/local/include -lzmq          -> prima::zmq (pkg-config or find_library)
+#   /opt/homebrew/{include,lib} on Darwin      -> extra search hints
+#   USE_HIGHS=1 (-DUSE_HIGHS -lhighs)          -> LLAMA_PRIMA_HIGHS, prima::highs
+#   src/network-utils.o, common/profiler.o     -> added to llama / llama-common when present
+#   profile-tool                               -> llama-profile-tool, when present
+#   BUILD_TARGETS                              -> custom target "prima"
+
+set(LLAMA_PRIMA_SEARCH_PREFIXES /usr/local)
+if (APPLE)
+    list(APPEND LLAMA_PRIMA_SEARCH_PREFIXES /opt/homebrew)
+endif()
+
+if (LLAMA_PRIMA AND NOT TARGET prima::zmq)
+    find_package(PkgConfig QUIET)
+    if (PkgConfig_FOUND)
+        set(_prima_pc_path_old "$ENV{PKG_CONFIG_PATH}")
+        foreach (prefix ${LLAMA_PRIMA_SEARCH_PREFIXES})
+            set(ENV{PKG_CONFIG_PATH} "$ENV{PKG_CONFIG_PATH}:${prefix}/lib/pkgconfig")
+        endforeach()
+        pkg_check_modules(ZMQ QUIET IMPORTED_TARGET GLOBAL libzmq)
+        set(ENV{PKG_CONFIG_PATH} "${_prima_pc_path_old}")
+    endif()
+
+    if (ZMQ_FOUND)
+        add_library(prima::zmq ALIAS PkgConfig::ZMQ)
+    else()
+        find_path   (ZMQ_INCLUDE_DIR zmq.h      HINTS ${LLAMA_PRIMA_SEARCH_PREFIXES} PATH_SUFFIXES include)
+        find_library(ZMQ_LIBRARY     NAMES zmq libzmq HINTS ${LLAMA_PRIMA_SEARCH_PREFIXES} PATH_SUFFIXES lib)
+        if (ZMQ_INCLUDE_DIR AND ZMQ_LIBRARY)
+            add_library(prima::zmq UNKNOWN IMPORTED GLOBAL)
+            set_target_properties(prima::zmq PROPERTIES
+                IMPORTED_LOCATION             "${ZMQ_LIBRARY}"
+                INTERFACE_INCLUDE_DIRECTORIES "${ZMQ_INCLUDE_DIR}")
+        endif()
+    endif()
+
+    if (TARGET prima::zmq)
+        message(STATUS "prima: ZeroMQ found, distributed inference enabled")
+    else()
+        message(WARNING "prima: ZeroMQ (libzmq) not found, distributed inference disabled")
+    endif()
+endif()
+
+if (LLAMA_PRIMA AND LLAMA_PRIMA_HIGHS AND NOT TARGET prima::highs)
+    find_package(highs CONFIG QUIET HINTS ${LLAMA_PRIMA_SEARCH_PREFIXES})
+    if (TARGET highs::highs)
+        add_library(prima::highs ALIAS highs::highs)
+    else()
+        find_path   (HIGHS_INCLUDE_DIR NAMES Highs.h HINTS ${LLAMA_PRIMA_SEARCH_PREFIXES} PATH_SUFFIXES include/highs)
+        find_library(HIGHS_LIBRARY     NAMES highs        HINTS ${LLAMA_PRIMA_SEARCH_PREFIXES} PATH_SUFFIXES lib)
+        if (HIGHS_INCLUDE_DIR AND HIGHS_LIBRARY)
+            add_library(prima::highs UNKNOWN IMPORTED GLOBAL)
+            set_target_properties(prima::highs PROPERTIES
+                IMPORTED_LOCATION             "${HIGHS_LIBRARY}"
+                INTERFACE_INCLUDE_DIRECTORIES "${HIGHS_INCLUDE_DIR}")
+        endif()
+    endif()
+
+    if (TARGET prima::highs)
+        message(STATUS "prima: HiGHS found, solver based layer assignment enabled")
+    else()
+        message(FATAL_ERROR "prima: LLAMA_PRIMA_HIGHS is ON but HiGHS was not found, install it or set CMAKE_PREFIX_PATH")
+    endif()
+endif()
+
+# link the prima.cpp dependencies (zmq, HiGHS) into a target, like MK_LDFLAGS did for every object in the Makefile
+function(llama_prima_link_deps TARGET)
+    if (TARGET prima::zmq)
+        target_compile_definitions(${TARGET} PRIVATE LLAMA_USE_ZMQ)
+        target_link_libraries     (${TARGET} PRIVATE prima::zmq)
+    endif()
+    if (TARGET prima::highs)
+        target_compile_definitions(${TARGET} PRIVATE USE_HIGHS)
+        target_link_libraries     (${TARGET} PRIVATE prima::highs)
+    endif()
+endfunction()
+
+#
 # build the library
 #
 
@@ -258,6 +340,17 @@ endif()
 
 if (LLAMA_BUILD_APP)
     add_subdirectory(app)
+endif()
+
+# prima.cpp default build targets (BUILD_TARGETS in prima.cpp/Makefile)
+# usage: cmake --build build --target prima
+if (LLAMA_PRIMA)
+    add_custom_target(prima)
+    foreach (tgt llama-server llama-cli llama-completion llama-speculative llama-gguf-split llama-profile-tool)
+        if (TARGET ${tgt})
+            add_dependencies(prima ${tgt})
+        endif()
+    endforeach()
 endif()
 
 # Standalone libmtmd build without pulling in the rest of the tools/ tree.

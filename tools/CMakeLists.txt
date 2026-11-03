@@ -45,4 +45,8 @@ else()
         add_subdirectory(tuning)
     endif()
     add_subdirectory(results)
+    # profile-tool in prima.cpp/Makefile
+    if (LLAMA_PRIMA AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/profile-tool/CMakeLists.txt)
+        add_subdirectory(profile-tool)
+    endif()
 endif()

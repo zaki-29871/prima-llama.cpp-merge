@@ -187,6 +187,14 @@ endif()
 
 target_link_libraries(${TARGET} PUBLIC llama Threads::Threads)
 
+if (LLAMA_PRIMA)
+    llama_prima_link_deps(${TARGET})
+    # common/profiler.o in prima.cpp/Makefile
+    if (EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/profiler.cpp)
+        target_sources(${TARGET} PRIVATE profiler.cpp profiler.h)
+    endif()
+endif()
+
 if (CMAKE_SYSTEM_NAME MATCHES "AIX")
     # AIX's flock() function comes from libbsd.a
     target_link_libraries(${TARGET} PRIVATE -lbsd)

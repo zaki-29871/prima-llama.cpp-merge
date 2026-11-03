@@ -20,7 +20,23 @@ Not ported yet: device profiling and automatic layer assignment (HiGHS), device 
 
 ## Build
 
-Install ZeroMQ, for example `sudo apt install libzmq3-dev` or `brew install zeromq`. The CMake option `LLAMA_PRIMA` (default `ON`) links `libzmq` when it is found. Without `libzmq` the build works, but `--world` > 1 fails at runtime.
+Install ZeroMQ, for example `sudo apt install libzmq3-dev` or `brew install zeromq`. The CMake option `LLAMA_PRIMA` (default `ON`) links `libzmq` when it is found (pkg-config first, then `/usr/local` and, on macOS, `/opt/homebrew`). Without `libzmq` the build works, but `--world` > 1 fails at runtime.
+
+```bash
+cmake -B build
+cmake --build build --config Release --target prima
+```
+
+The `prima` target builds the same set of programs as the default target of the prima.cpp Makefile (`llama-server`, `llama-cli`, `llama-completion`, `llama-speculative`, `llama-gguf-split`).
+
+The prima.cpp Makefile options map to CMake as follows:
+
+| Makefile | CMake |
+|----------|-------|
+| `-lzmq` (always) | `-DLLAMA_PRIMA=ON` (default) |
+| `USE_HIGHS=1` | `-DLLAMA_PRIMA_HIGHS=ON`, defines `USE_HIGHS` and links HiGHS (`find_package(highs)` or `libhighs` in `/usr/local`, `/opt/homebrew`) |
+| `src/network-utils.o`, `common/profiler.o` | added to `llama` / `llama-common` once the sources are ported |
+| `profile-tool` | `tools/profile-tool`, added once it is ported |
 
 ## Usage
 

@@ -73,16 +73,10 @@ target_compile_features   (llama PRIVATE cxx_std_17) # don't bump
 target_link_libraries(llama PUBLIC ggml)
 
 if (LLAMA_PRIMA)
-    find_package(PkgConfig QUIET)
-    if (PkgConfig_FOUND)
-        pkg_check_modules(ZMQ IMPORTED_TARGET libzmq)
-    endif()
-    if (ZMQ_FOUND)
-        message(STATUS "prima: ZeroMQ found, distributed inference enabled")
-        target_compile_definitions(llama PRIVATE LLAMA_USE_ZMQ)
-        target_link_libraries(llama PRIVATE PkgConfig::ZMQ)
-    else()
-        message(WARNING "prima: ZeroMQ (libzmq) not found, distributed inference disabled")
+    llama_prima_link_deps(llama)
+    # src/network-utils.o in prima.cpp/Makefile
+    if (EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/network-utils.cpp)
+        target_sources(llama PRIVATE network-utils.cpp network-utils.h)
     endif()
 endif()
 
