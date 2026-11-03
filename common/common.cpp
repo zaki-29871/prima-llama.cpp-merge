@@ -1261,6 +1261,18 @@ common_gguf_info common_get_gguf_info(const std::string & fname) {
 
 common_init_result::common_init_result(common_params & params, bool model_only) :
     pimpl(new impl{}) {
+    if (params.n_world > 1) {
+        // prima.cpp: these drafters read the hidden state of the target, which is split across the ring
+        for (const auto type : params.speculative.types) {
+            if (type == COMMON_SPECULATIVE_TYPE_DRAFT_MTP    || type == COMMON_SPECULATIVE_TYPE_DRAFT_EAGLE3 ||
+                type == COMMON_SPECULATIVE_TYPE_DRAFT_DFLASH || type == COMMON_SPECULATIVE_TYPE_DRAFT_DSPARK) {
+                COM_ERR("speculative type '%s' is not supported with --world > 1, use a draft model or n-grams\n",
+                    common_speculative_type_to_str(type).c_str());
+                return;
+            }
+        }
+    }
+
     if (params.n_world > 1 && !model_only) {
         // prima.cpp: set up the ring, this can change the rank, the world size and the layer windows
         try {
@@ -1741,6 +1753,9 @@ struct llama_model_params common_model_params_to_llama(common_params & params) {
     mparams.progress_callback_user_data = params.load_progress_callback_user_data;
     mparams.no_alloc                    = params.no_alloc;
     mparams.load_mtp                    = params.load_mtp || std::find(params.speculative.types.begin(), params.speculative.types.end(), COMMON_SPECULATIVE_TYPE_DRAFT_MTP) != params.speculative.types.end();
+
+    mparams.keep_out_in_metal = params.keep_out_in_metal;
+    mparams.keep_out_in_cuda  = params.keep_out_in_cuda;
 
     mparams.n_world = params.n_world;
     mparams.rank    = params.rank;

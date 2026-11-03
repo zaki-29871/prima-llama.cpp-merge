@@ -49,6 +49,28 @@ kernel void kernel_op_sum_f32(
     }
 }
 
+// read every element, the result is written only if the sum is -inf, which keeps the loads
+kernel void kernel_op_read_f32(
+        constant ggml_metal_kargs_read & args,
+        device const float * src0,
+        device       float * dst,
+        uint tpig[[thread_position_in_grid]],
+        uint ntpg[[threads_per_grid]]) {
+    if (tpig == 0) {
+        dst[0] = 0.0f;
+    }
+
+    float sumf = 0.0f;
+
+    for (uint64_t i = tpig; i < args.np; i += ntpg) {
+        sumf += src0[i];
+    }
+
+    if (sumf == -INFINITY) {
+        dst[0] = sumf;
+    }
+}
+
 constant short FC_sum_rows_op [[function_constant(FC_SUM_ROWS + 0)]];
 
 template <typename T0, typename T>

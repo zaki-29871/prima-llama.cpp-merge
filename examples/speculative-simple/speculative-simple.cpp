@@ -49,6 +49,11 @@ int main(int argc, char ** argv) {
     model_tgt = llama_init_tgt->model();
     ctx_tgt   = llama_init_tgt->context();
 
+    // prima.cpp: a worker only serves its layers for the master
+    if (params.n_world > 1 && params.rank != 0) {
+        return ctx_tgt && llama_prima_worker_run(ctx_tgt) == 0 ? 0 : 1;
+    }
+
     const llama_vocab * vocab = llama_model_get_vocab(model_tgt);
 
     // load the draft model (if any) - this also creates the MTP draft context when MTP speculation is enabled

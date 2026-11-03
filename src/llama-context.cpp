@@ -1933,7 +1933,8 @@ int32_t llama_context::pp_worker_run() {
 
                             ok = ok && batch.set_token_embd(id, { data.hidden.data() + i*n_embd, 1, n_embd });
                             ok = ok && batch.set_token_pos (id, &data.pos[i]);
-                            ok = ok && batch.set_output    (id, data.output[i] != 0);
+                            // the worker has no output head, so it marks no outputs
+                            ok = ok && batch.set_output    (id, false);
                             if (!ok) {
                                 throw std::runtime_error("prima: failed to build the batch, use the same batch sizes and parallel slots on all nodes");
                             }
@@ -3992,6 +3993,10 @@ size_t llama_context::state_seq_save_file(llama_seq_id seq_id, const char * file
 }
 
 size_t llama_context::state_write_data(llama_io_write_i & io) {
+    if (model.pp_enabled()) {
+        throw std::runtime_error("prima: saving and loading the state is not supported with n_world > 1");
+    }
+
     LLAMA_LOG_DEBUG("%s: writing state\n", __func__);
 
     // write model info
@@ -4012,6 +4017,10 @@ size_t llama_context::state_write_data(llama_io_write_i & io) {
 }
 
 size_t llama_context::state_read_data(llama_io_read_i & io) {
+    if (model.pp_enabled()) {
+        throw std::runtime_error("prima: saving and loading the state is not supported with n_world > 1");
+    }
+
     LLAMA_LOG_DEBUG("%s: reading state\n", __func__);
 
     // read model info
@@ -4038,6 +4047,10 @@ size_t llama_context::state_read_data(llama_io_read_i & io) {
 }
 
 size_t llama_context::state_seq_write_data(llama_io_write_i & io, llama_seq_id seq_id, llama_state_seq_flags flags) {
+    if (model.pp_enabled()) {
+        throw std::runtime_error("prima: saving and loading the state is not supported with n_world > 1");
+    }
+
     if (memory) {
         memory->state_write(io, seq_id, flags);
     }
@@ -4046,6 +4059,10 @@ size_t llama_context::state_seq_write_data(llama_io_write_i & io, llama_seq_id s
 }
 
 size_t llama_context::state_seq_read_data(llama_io_read_i & io, llama_seq_id seq_id, llama_state_seq_flags flags) {
+    if (model.pp_enabled()) {
+        throw std::runtime_error("prima: saving and loading the state is not supported with n_world > 1");
+    }
+
     if (memory) {
         memory->state_read(io, seq_id, flags);
     }

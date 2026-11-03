@@ -3009,6 +3009,28 @@ struct test_rms_norm_mul_rope : public test_case {
 };
 
 // GGML_OP_ARGMAX
+// GGML_OP_READ
+struct test_read : public test_case {
+    const std::array<int64_t, 4> ne;
+
+    std::string vars() override {
+        return VARS_TO_STR1(ne);
+    }
+
+    test_read(std::array<int64_t, 4> ne = {1024, 64, 1, 1})
+        : ne(ne) {}
+
+    ggml_tensor * build_graph(ggml_context * ctx) override {
+        ggml_tensor * a = ggml_new_tensor(ctx, GGML_TYPE_F32, 4, ne.data());
+        ggml_set_name(a, "a");
+
+        ggml_tensor * out = ggml_read(ctx, a);
+        ggml_set_name(out, "out");
+
+        return out;
+    }
+};
+
 struct test_argmax : public test_case {
     const ggml_type type;
     const std::array<int64_t, 4> ne;
@@ -10628,6 +10650,8 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
     test_cases.emplace_back(new test_count_equal(GGML_TYPE_F32, {4,  500, 1, 1}));
     test_cases.emplace_back(new test_count_equal(GGML_TYPE_F32, {4, 5000, 1, 1}));
 
+    test_cases.emplace_back(new test_read({1024, 64, 1, 1}));
+    test_cases.emplace_back(new test_read({1000, 3, 5, 1}));
     test_cases.emplace_back(new test_argmax(GGML_TYPE_F32, {32,    1, 1, 1}));
     test_cases.emplace_back(new test_argmax(GGML_TYPE_F32, {32,  513, 1, 1}));
     test_cases.emplace_back(new test_argmax(GGML_TYPE_F32, {100,  10, 1, 1}));

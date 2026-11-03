@@ -567,6 +567,35 @@ static int server_run_router(common_params & params, int argc, char ** argv, con
 }
 
 //
+// prima.cpp worker
+//
+
+// a node with rank > 0 serves its layers for the master, it has no HTTP server
+static int server_run_prima_worker(common_params & params) {
+    // the master keeps the draft model and the multimodal projector
+    params.speculative.types = { COMMON_SPECULATIVE_TYPE_NONE };
+    params.speculative.draft.mparams = {};
+    params.mmproj.path.clear();
+
+    SRV_INF("prima worker, rank %d/%d\n", params.rank, params.n_world);
+
+    common_init_result_ptr llama_init = common_init_from_params(params);
+
+    llama_context * ctx = llama_init->context();
+    if (ctx == nullptr) {
+        SRV_ERR("failed to load model, '%s'\n", params.model.path.c_str());
+        return 1;
+    }
+
+    const int32_t ret = llama_prima_worker_run(ctx);
+
+    llama_init.reset();
+    llama_backend_free();
+
+    return ret == 0 ? 0 : 1;
+}
+
+//
 // instance
 //
 
@@ -579,6 +608,10 @@ static int server_run_instance(common_params & params, server_role & role, commo
             SRV_ERR("failed to download model: %s\n", e.what());
             return 1;
         }
+    }
+
+    if (params.n_world > 1 && params.rank != 0) {
+        return server_run_prima_worker(params);
     }
 
     // note: this is guaranteed to out-live ctx_http and tools

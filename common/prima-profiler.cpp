@@ -578,6 +578,18 @@ static float device_gflops(ggml_backend_dev_t dev, ggml_type type, int64_t n_emb
     return t > 0.0 ? (float) (2.0*n*n*n / t / 1e9) : 0.0f;
 }
 
+// read speed of the device memory, in GB/s
+static float device_read_bw(ggml_backend_dev_t dev, int n_threads) {
+    const int64_t n = 64ll*1024*1024; // 256 MiB of F32
+
+    const double t = bench_graph(dev, n_threads, 2, [&](ggml_context * ctx_w, ggml_context * ctx_g, ggml_cgraph * gf) {
+        ggml_tensor * a = ggml_new_tensor_1d(ctx_w, GGML_TYPE_F32, n);
+        ggml_build_forward_expand(gf, ggml_read(ctx_g, a));
+    });
+
+    return t > 0.0 ? (float) (n*sizeof(float) / t / 1e9) : 0.0f;
+}
+
 // time to copy the K and V of one token of one layer into a F16 cache, in ms
 static float device_kv_cpy_ms(ggml_backend_dev_t dev, const prima_model_stats & ms, int n_threads) {
     const double t = bench_graph(dev, n_threads, 4, [&](ggml_context * ctx_w, ggml_context * ctx_g, ggml_cgraph * gf) {
@@ -658,7 +670,8 @@ prima_device_info prima_profile_device(const common_params & params, const prima
         di.gpu_mem_total = (float) (total / gib);
 
         if (di.has_gpu) {
-            di.gpu_kv_cpy_ms = device_kv_cpy_ms(gpu, ms, n_threads);
+            di.gpu_kv_cpy_ms    = device_kv_cpy_ms(gpu, ms, n_threads);
+            di.gpu_read_vram_bw = device_read_bw(gpu, n_threads);
             for (ggml_type t : types) {
                 di.gpu_gflops[t] = device_gflops(gpu, t, ms.n_embd, n_threads);
             }
@@ -726,6 +739,7 @@ void prima_print_devices(const std::vector<prima_device_info> & devs, const prim
     row("GPU",                     [](const prima_device_info & d) { return std::string(d.gpu_metal ? "Metal" : d.gpu_cuda ? "CUDA" : "none"); });
     row("GPU free memory (GiB)",   [](const prima_device_info & d) { return string_format("%.2f", d.gpu_mem_free); });
     row("GPU KV copy (ms)",        [](const prima_device_info & d) { return string_format("%.3f", d.gpu_kv_cpy_ms); });
+    row("VRAM read bw (GB/s)",     [](const prima_device_info & d) { return string_format("%.2f", d.gpu_read_vram_bw); });
     for (int t = 0; t < std::min<int>(PRIMA_N_TYPES, GGML_TYPE_COUNT); ++t) {
         if (ms.layer_flops[t] > 0 || ms.output_flops[t] > 0) {
             const std::string name = string_format("GPU %s x F32 (GFLOPS)", ggml_type_name((ggml_type) t));

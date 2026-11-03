@@ -62,6 +62,7 @@ struct prima_device_info {
     float    gpu_mem_free  = 0.0f; // GiB
     float    gpu_mem_total = 0.0f; // GiB
     float    gpu_kv_cpy_ms = 0.0f;
+    float    gpu_read_vram_bw = 0.0f; // GB/s, measured with GGML_OP_READ
 
     float    cpu_gflops[PRIMA_N_TYPES] = {}; // matmul speed by weight type
     float    gpu_gflops[PRIMA_N_TYPES] = {};

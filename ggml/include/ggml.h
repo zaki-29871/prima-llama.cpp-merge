@@ -602,6 +602,8 @@ extern "C" {
 
         GGML_OP_GLU,
 
+        GGML_OP_READ,
+
         GGML_OP_COUNT,
     };
 
@@ -1073,6 +1075,12 @@ extern "C" {
 
     // argmax along rows
     GGML_API struct ggml_tensor * ggml_argmax(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * a);
+
+    // read all elements of a (F32), used to measure the memory read bandwidth of a device
+    // the result is a single element with no meaning
+    GGML_API struct ggml_tensor * ggml_read(
             struct ggml_context * ctx,
             struct ggml_tensor  * a);
 

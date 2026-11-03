@@ -4909,15 +4909,21 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             params.prefetch = true;
         }
     ).set_env("LLAMA_ARG_PREFETCH"));
-#ifdef GGML_USE_CUDA
     add_opt(common_arg(
         {"--keep-out-in-cuda"},
-        format("whether to compute the output layer on CUDA (default: %s)", params.keep_out_in_cuda ? "true" : "false"),
+        format("with --world > 1, run the output layer on the CUDA (or other non-Metal) GPU of the master (default: %s)", params.keep_out_in_cuda ? "true" : "false"),
         [](common_params & params) {
             params.keep_out_in_cuda = true;
         }
-    ).set_env("LLAMA_ARG_KEEP_INP_OUT_IN_CUDA"));
-#endif
+    ).set_env("LLAMA_ARG_KEEP_OUT_IN_CUDA"));
+    add_opt(common_arg(
+        {"--keep-out-in-metal"},
+        {"--no-keep-out-in-metal"},
+        format("with --world > 1, run the output layer on the Metal GPU of the master (default: %s)", params.keep_out_in_metal ? "true" : "false"),
+        [](common_params & params, bool value) {
+            params.keep_out_in_metal = value;
+        }
+    ).set_env("LLAMA_ARG_KEEP_OUT_IN_METAL"));
     add_opt(common_arg(
         {"--force"},
         format("force to start prefetching after computation (default: %s)", params.force ? "true" : "false"),

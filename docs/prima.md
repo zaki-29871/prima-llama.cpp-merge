@@ -16,10 +16,15 @@ Ported:
 - device profiling and automatic layer assignment with the HiGHS solver (`common/prima-profiler.cpp`, `common/prima.cpp`)
 - device selection: devices that get only one layer are removed, nodes that cannot reach the next worker keep the removed node in between as a forwarder
 - weight prefetching (`--prefetch`)
-- supported architectures: `llama`, `qwen2`, `qwen3` (this covers the Llama, Qwen 2.5, QwQ and DeepSeek-R1 distill models)
-- supported tool: `llama-completion`
+- output layer placement with `--keep-out-in-cuda` and `--keep-out-in-metal`
+- `llama-server` on the master with several parallel slots and continuous (dynamic) batching
+- speculative decoding with a draft model or n-grams (`llama-server`, `llama-speculative`, `llama-speculative-simple`)
+- `llama-profile-tool`, the device profiler
+- `GGML_OP_READ`, the memory read op used by the profiler, on CPU, CUDA and Metal
+- supported architectures: `llama`, `qwen2`, `qwen3`, `granite`, `granite_moe` (this covers the Llama, Qwen 2.5, Qwen 3, QwQ, DeepSeek-R1 distill and Granite models)
+- supported tools: `llama-completion`, `llama-server`, `llama-cli`, `llama-speculative`, `llama-speculative-simple`
 
-Not ported yet: the Metal/CUDA specific changes, `llama-server`, speculative decoding, embeddings and session files.
+Not ported yet: embeddings, and saving or loading the state (session files, the server prompt cache and slot save/restore).
 
 ## Automatic layer assignment
 
@@ -32,7 +37,7 @@ When `--n-layer-window` is not given, the nodes set up the ring before they load
 5. if devices are removed, each node connects to its next worker. If the next worker cannot be reached, the removed node in between stays as a forwarder that only passes the messages on. Other removed nodes exit
 6. the workers get new ranks `0..n-1` in the ring order, then all nodes load their layers
 
-`n[m]` is the number of GPU layers per window: the last `n[m]` layers of each window of device `m` go to the GPU. If `-ngl` is given, it is used instead (also per window). The output layer goes to the GPU only when the whole last window of the master is on the GPU.
+`n[m]` is the number of GPU layers per window: the last `n[m]` layers of each window of device `m` go to the GPU. If `-ngl` is given, it is used instead (also per window). The output layer runs on the master, see [GPU layers and the output layer](#gpu-layers-and-the-output-layer).
 
 The solver uses a GPU only if it is a CUDA (or ROCm, MUSA) or a Metal device.
 
@@ -61,7 +66,7 @@ The prima.cpp Makefile options map to CMake as follows:
 | `USE_HIGHS=1` | `-DLLAMA_PRIMA_HIGHS=ON`, defines `USE_HIGHS` and links HiGHS (`find_package(highs)` or `libhighs` in `/usr/local`, `/opt/homebrew`) |
 | `src/network-utils.o` | the port check is in `src/llama-prima.cpp` (`llama_prima_port_open`) |
 | `common/profiler.o` | `common/prima-profiler.cpp`, the solver and the ring setup are in `common/prima.cpp` |
-| `profile-tool` | `tools/profile-tool`, added once it is ported |
+| `profile-tool` | `tools/profile-tool` (`llama-profile-tool`) |
 
 For the automatic layer assignment install [HiGHS](https://github.com/ERGO-Code/HiGHS), for example `brew install highs`, or build it from source:
 
@@ -107,6 +112,54 @@ llama-completion -m model.gguf --world 3 --rank 1 --next 192.168.1.4
 llama-completion -m model.gguf -c 4096 --world 3 --rank 0 --next 192.168.1.3 --prefetch -p "Once upon a time" -n 128
 ```
 
+### Server
+
+Run `llama-server` on the master. The workers run `llama-server` (or `llama-completion`) with the same model and the same `-c`, `-b`, `-ub`, `-np` and `-kvu` values; a worker loads its layers and serves the ring, it does not open an HTTP port.
+
+```bash
+# node 1 (192.168.1.3)
+llama-server -m model.gguf -c 8192 -np 4 --world 2 --rank 1 --next 192.168.1.2
+```
+
+```bash
+# node 0 (192.168.1.2)
+llama-server -m model.gguf -c 8192 -np 4 --world 2 --rank 0 --next 192.168.1.3 --host 0.0.0.0 --port 8080
+```
+
+Requests from several users run in parallel slots and are batched together in each decode, the ring sees one ubatch at a time. With `--world > 1` the server turns off the prompt cache (`--cache-ram`) and the context checkpoints, because the KV cache is split across the nodes. Slot save/restore returns an error.
+
+### Speculative decoding
+
+The draft model always runs on the master and is not split. Give it with `-md` on the master only:
+
+```bash
+# master
+llama-server -m model-70b.gguf -md model-1b.gguf --world 2 --rank 0 --next 192.168.1.3 ...
+```
+
+The n-gram drafters (`--spec-type ngram-simple`, ...) also work. The drafters that read the hidden state of the target (MTP, Eagle3, DFlash, DSpark) are not supported with `--world > 1`.
+
+### GPU layers and the output layer
+
+On each node, `-ngl N` (or the GPU layers from the solver) puts the last `N` layers of each of its windows on the GPU, as in prima.cpp. The other layers of the window stay on the CPU.
+
+The output layer runs on the master. It goes to the GPU only when asked:
+
+- `--keep-out-in-cuda`: run it on a CUDA (or any other non-Metal) GPU, off by default
+- `--keep-out-in-metal` / `--no-keep-out-in-metal`: run it on a Metal GPU, on by default
+
+These two options apply only with `--world > 1`. With one node the usual llama.cpp rule applies: the output layer is on the GPU when `-ngl` is larger than the number of layers.
+
+### Device profiler
+
+`llama-profile-tool` runs the same profiling as the automatic layer assignment on this node only and prints the result: RAM and swap, disk read speed of the model file, CPU memory bandwidth, GPU memory read bandwidth (with `GGML_OP_READ`), KV copy time and the matmul speed of the CPU and the GPU for the weight types of the model:
+
+```bash
+llama-profile-tool -m model.gguf -c 4096 -t 8 --gpu-mem 8
+```
+
+Use it to check a device, or to choose `-lw` and `-ngl` by hand: give more layers to the faster nodes, and as many GPU layers as fit in the GPU memory.
+
 Options:
 
 | option | description |
@@ -122,4 +175,7 @@ Options:
 | `--master-priority F` | weight of the master in the solver, > 1 puts more layers on the master (default 1.01) |
 | `-gm, --gpu-mem N` | GPU memory in GiB that the solver may use (default all) |
 
-`--master`, `--signal-port` and `--keep-out-in-cuda` of prima.cpp are accepted, but this port does not use them.
+| `--keep-out-in-cuda` | run the output layer on the CUDA GPU of the master |
+| `--[no-]keep-out-in-metal` | run the output layer on the Metal GPU of the master (default on) |
+
+`--master` and `--signal-port` of prima.cpp are accepted, but this port does not use them.

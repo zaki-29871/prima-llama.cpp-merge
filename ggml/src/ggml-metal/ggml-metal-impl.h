@@ -835,6 +835,10 @@ typedef struct {
 } ggml_metal_kargs_sum;
 
 typedef struct {
+    uint64_t np;
+} ggml_metal_kargs_read;
+
+typedef struct {
     int64_t  ne00;
     int64_t  ne01;
     int64_t  ne02;

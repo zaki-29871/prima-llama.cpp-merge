@@ -1688,7 +1688,7 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
         const bool is_swa = il < n_layer_all && hparams.is_swa(il);
         if (pp_enabled()) {
             // prima.cpp: n_gpu_layers is per window, the last n_gpu_layers layers of each window go to the GPU
-            // the output layer goes to the GPU if the whole last window of the master is on the GPU
+            // the output layer is placed later by pp_assign_output()
             const auto & w = il < n_layer_all ? pp_window_of_layer(il) : pp_windows.back();
             const int n_win = w.il1 - w.il0;
             const int n_gpu = devices.empty() ? 0 : std::min(n_gpu_layers, n_win);
@@ -1725,6 +1725,10 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
 
     // assign the output layer
     pimpl->dev_output = get_layer_buft_list(n_layer_all);
+
+    if (pp_enabled()) {
+        pp_assign_output();
+    }
 
     const auto TENSOR_NOT_REQUIRED = llama_model_loader::TENSOR_NOT_REQUIRED;
 
@@ -2454,9 +2458,15 @@ void llama_model::pp_init() {
         case LLM_ARCH_LLAMA:
         case LLM_ARCH_QWEN2:
         case LLM_ARCH_QWEN3:
+        case LLM_ARCH_GRANITE:
+        case LLM_ARCH_GRANITE_MOE:
             break;
         default:
             throw std::runtime_error(format("prima: distributed inference is not supported for arch %s", arch_name().c_str()));
+    }
+
+    if (hparams.n_deepstack_layers > 0) {
+        throw std::runtime_error("prima: models with deepstack inputs are not supported");
     }
 
     if (hparams.n_layer_all != hparams.n_layer()) {
@@ -2481,6 +2491,25 @@ const llama_prima_window & llama_model::pp_window_of_layer(int il) const {
         }
     }
     GGML_ABORT("prima: layer %d is not in any window", il);
+}
+
+void llama_model::pp_assign_output() {
+    ggml_backend_dev_t cpu_dev = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU);
+
+    // the output layer runs on the master, on the GPU only if --keep-out-in-cuda / --keep-out-in-metal says so
+    pimpl->dev_output = { cpu_dev, &pimpl->cpu_buft_list };
+    if (pp_rank == 0 && !devices.empty()) {
+        auto * dev = devices.at(0).dev;
+        const bool is_metal = strcmp(ggml_backend_reg_name(ggml_backend_dev_backend_reg(dev)), "MTL") == 0;
+        const bool keep_out = is_metal ? params.keep_out_in_metal : params.keep_out_in_cuda;
+        if (keep_out) {
+            pimpl->dev_output = { dev, &pimpl->gpu_buft_list.at(dev) };
+        }
+    }
+
+    if (pp_rank == 0) {
+        LLAMA_LOG_INFO("%s: output layer on %s\n", __func__, ggml_backend_dev_name(pimpl->dev_output.dev));
+    }
 }
 
 bool llama_model::pp_owns_layer(int il) const {
@@ -3486,6 +3515,8 @@ llama_model_params llama_model_default_params() {
         /*.no_host                     =*/ false,
         /*.no_alloc                    =*/ false,
         /*.load_mtp                    =*/ false,
+        /*.keep_out_in_metal           =*/ true,
+        /*.keep_out_in_cuda            =*/ false,
         /*.n_world                     =*/ 1,
         /*.rank                        =*/ 0,
         /*.n_layer_window              =*/ {0},

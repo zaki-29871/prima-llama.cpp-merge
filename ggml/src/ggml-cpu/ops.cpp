@@ -1583,6 +1583,37 @@ void ggml_compute_forward_mean(
     }
 }
 
+// ggml_compute_forward_read
+
+void ggml_compute_forward_read(
+        const ggml_compute_params * params,
+        ggml_tensor * dst) {
+    const ggml_tensor * src0 = dst->src[0];
+
+    GGML_ASSERT(src0->type == GGML_TYPE_F32);
+    GGML_ASSERT(ggml_is_contiguous(src0));
+
+    const int64_t n  = ggml_nelements(src0);
+    const int64_t dr = (n + params->nth - 1)/params->nth;
+    const int64_t i0 = dr*params->ith;
+    const int64_t i1 = MIN(i0 + dr, n);
+
+    const float * x = (const float *) src0->data;
+
+    float sum = 0.0f;
+    for (int64_t i = i0; i < i1; ++i) {
+        sum += x[i];
+    }
+
+    // the result has no meaning, the write only keeps the reads
+    volatile float sink = sum;
+    (void) sink;
+
+    if (params->ith == 0) {
+        ((float *) dst->data)[0] = 0.0f;
+    }
+}
+
 // ggml_compute_forward_argmax
 
 static void ggml_compute_forward_argmax_f32(

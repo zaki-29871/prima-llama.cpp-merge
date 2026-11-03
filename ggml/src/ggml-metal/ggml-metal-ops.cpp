@@ -332,6 +332,10 @@ static int ggml_metal_op_encode_impl(ggml_metal_op_t ctx, int idx) {
             {
                 n_fuse = ggml_metal_op_sum(ctx, idx);
             } break;
+        case GGML_OP_READ:
+            {
+                n_fuse = ggml_metal_op_read(ctx, idx);
+            } break;
         case GGML_OP_SUM_ROWS:
         case GGML_OP_MEAN:
             {
@@ -998,6 +1002,33 @@ int ggml_metal_op_sum(ggml_metal_op_t ctx, int idx) {
     ggml_metal_encoder_set_threadgroup_memory_size(enc, GGML_PAD(nsg * sizeof(float), 16), 0);
 
     ggml_metal_encoder_dispatch_threadgroups(enc, 1, 1, 1, nth, 1, 1);
+
+    return 1;
+}
+
+int ggml_metal_op_read(ggml_metal_op_t ctx, int idx) {
+    ggml_tensor * op = ctx->node(idx);
+
+    ggml_metal_library_t lib = ctx->lib;
+    ggml_metal_encoder_t enc = ctx->enc;
+
+    const uint64_t n = (uint64_t) ggml_nelements(op->src[0]);
+
+    ggml_metal_kargs_read args = {
+        /*.np =*/ n,
+    };
+
+    auto pipeline = ggml_metal_library_get_pipeline_read(lib, op);
+
+    const int nth = std::min(256, ggml_metal_pipeline_max_theads_per_threadgroup(pipeline));
+    const int ntg = (int) std::min<uint64_t>((n + nth - 1)/nth, 4096);
+
+    ggml_metal_encoder_set_pipeline(enc, pipeline);
+    ggml_metal_encoder_set_bytes   (enc, &args, sizeof(args), 0);
+    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op->src[0]), 1);
+    ggml_metal_encoder_set_buffer  (enc, ggml_metal_get_buffer_id(op),         2);
+
+    ggml_metal_encoder_dispatch_threadgroups(enc, std::max(ntg, 1), 1, 1, nth, 1, 1);
 
     return 1;
 }

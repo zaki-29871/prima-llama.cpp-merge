@@ -2658,6 +2658,11 @@ common_params common_base_params_to_speculative(const common_params & params) {
             result.cpuparams.n_threads       = params_spec.cpuparams.n_threads;
             result.cpuparams_batch.n_threads = params_spec.cpuparams_batch.n_threads;
         }
+
+        // prima.cpp: the draft model is not split, it runs on the master only
+        result.n_world = 1;
+        result.rank    = 0;
+        std::fill(std::begin(result.n_layer_window), std::end(result.n_layer_window), 0);
     }
 
     result.cache_type_k  = params_spec.cache_type_k;

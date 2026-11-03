@@ -357,6 +357,8 @@ extern "C" {
         bool load_mtp;        // whether to load MTP layers
 
         // prima.cpp piped-ring parallelism
+        bool     keep_out_in_metal;  // run the output layer on a Metal GPU (only with n_world > 1)
+        bool     keep_out_in_cuda;   // run the output layer on a CUDA or other non-Metal GPU (only with n_world > 1)
         uint32_t n_world;            // number of nodes in the ring
         uint32_t rank;               // rank of this node
         uint32_t n_layer_window[32]; // number of layers per node in each cycle, all zero = even split

@@ -135,6 +135,11 @@ llama_model_granite::graph::graph(
 
     inpL = build_inp_embd(model.tok_embd);
 
+    if (pp_il1 == 0) {
+        build_pp_out(inpL);
+        return;
+    }
+
     // inp_pos - built only if rope enabled
     ggml_tensor * inp_pos = nullptr;
     if (hparams.has_rope(0)) {
@@ -142,9 +147,9 @@ llama_model_granite::graph::graph(
     }
     auto * inp_attn = build_attn_inp_kv();
 
-    ggml_tensor * inp_out_ids = build_inp_out_ids();
+    ggml_tensor * inp_out_ids = pp_has_output() ? build_inp_out_ids() : nullptr;
 
-    for (int il = 0; il < n_layer; ++il) {
+    for (int il = pp_il0; il < pp_il1; ++il) {
 
         // Granite Vision 4.1 deepstack: inject the projector stream that
         // targets decoder layer `il` before the decoder runs.
@@ -185,6 +190,11 @@ llama_model_granite::graph::graph(
         inpL = cur;
     }
     cur = inpL;
+
+    if (!pp_has_output()) {
+        build_pp_out(cur);
+        return;
+    }
 
     cur = build_norm(cur,
             model.output_norm, NULL,
