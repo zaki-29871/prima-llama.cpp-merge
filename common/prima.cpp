@@ -308,23 +308,23 @@ static bool assign_layers_to_devices(const std::vector<prima_device_info> & devs
             }
         }
 
-        double best_objective = 1.0e30;
-        std::vector<double> best_solution;
-        int best_k = -1;
+        // solve the MIP for k cycles
+        // obj_cap < 0: minimize the latency k * sum(a[m] * w[m] + b[m] * n[m]) + kappa + k * sum(c[m])
+        // obj_cap > 0: among the solutions with latency <= obj_cap, minimize the sum of the squared busy times of the devices
+        //              x^2 is replaced by its tangents x^2 >= 2*p*x - p^2 at n_tan points, the busy times are scaled by obj_cap
+        const int n_tan = 128;
 
-        for (int k : valid_k) {
-            if (n_layer % k != 0) {
-                continue;
-            }
+        auto solve = [&](int k, double obj_cap, std::vector<double> & sol, double & objective) -> bool {
             const int Wk = n_layer / k;
 
-            const HighsInt n_cols = 2*n_world;   // w[m], n[m]
-            const HighsInt n_rows = 1 + 3*n_world;
+            const bool balance = obj_cap > 0.0;
 
-            // objective: k * sum(a[m] * w[m] + b[m] * n[m]) + kappa + k * sum(c[m])
+            const HighsInt n_cols = 2*n_world + (balance ? n_world : 0); // w[m], n[m], s[m]
+            const HighsInt n_rows = 1 + 3*n_world + (balance ? 1 + n_world*(n_tan + 1) : 0);
+
             const double offset = k * std::accumulate(vec_c.begin(), vec_c.end(), 0.0) + kappa;
 
-            std::vector<double> cost(n_cols);
+            std::vector<double> cost(2*n_world);
             for (uint32_t m = 0; m < n_world; ++m) {
                 cost[m]           = k * vec_a[m];
                 cost[m + n_world] = k * vec_b[m];
@@ -376,6 +376,38 @@ static bool assign_layers_to_devices(const std::vector<prima_device_info> & devs
                 A[r][m + n_world] = 1.0;
             }
 
+            std::vector<double> obj(n_cols, 0.0);
+
+            if (!balance) {
+                std::copy(cost.begin(), cost.end(), obj.begin());
+            } else {
+                // the latency stays within the cap
+                row_upper[r] = obj_cap - offset;
+                std::copy(cost.begin(), cost.end(), A[r].begin());
+                r++;
+
+                // busy time of device m: x[m] = (k * (a[m] * w[m] + b[m] * n[m] + c[m]) + kappa on the master) / obj_cap
+                // no device is busy for longer than the latency, so the tangent points cover [0, 1.1]
+                for (uint32_t m = 0; m < n_world; ++m) {
+                    const HighsInt s_m = 2*n_world + m;
+
+                    obj[s_m]       = 1.0;
+                    col_lower[s_m] = 0.0;
+                    col_upper[s_m] = 1.0e30;
+
+                    const double x0 = (k * vec_c[m] + (m == 0 ? kappa : 0.0)) / obj_cap;
+
+                    // s[m] >= 2*p*x[m] - p^2
+                    for (int j = 0; j <= n_tan; ++j, ++r) {
+                        const double p = 1.1 * j / n_tan;
+                        row_upper[r] = p*p - 2.0*p*x0;
+                        A[r][m]           = 2.0*p * k * vec_a[m] / obj_cap;
+                        A[r][m + n_world] = 2.0*p * k * vec_b[m] / obj_cap;
+                        A[r][s_m]         = -1.0;
+                    }
+                }
+            }
+
             std::vector<HighsInt> a_start(n_cols + 1), a_index;
             std::vector<double>   a_value;
             for (HighsInt j = 0; j < n_cols; ++j) {
@@ -390,21 +422,44 @@ static bool assign_layers_to_devices(const std::vector<prima_device_info> & devs
             a_start[n_cols] = (HighsInt) a_index.size();
 
             std::vector<HighsInt> integrality(n_cols, kHighsVarTypeInteger);
-            std::vector<double>   col_value(n_cols, 0.0), row_value(n_rows, 0.0);
+            for (HighsInt j = 2*n_world; j < n_cols; ++j) {
+                integrality[j] = kHighsVarTypeContinuous;
+            }
+
+            std::vector<double> col_value(n_cols, 0.0), row_value(n_rows, 0.0);
             HighsInt model_status = 0;
 
-            const HighsInt status = Highs_mipCall(n_cols, n_rows, (HighsInt) a_value.size(), kHighsMatrixFormatColwise, kHighsObjSenseMinimize, offset,
-                    cost.data(), col_lower.data(), col_upper.data(), row_lower.data(), row_upper.data(),
+            const HighsInt status = Highs_mipCall(n_cols, n_rows, (HighsInt) a_value.size(), kHighsMatrixFormatColwise, kHighsObjSenseMinimize, balance ? 0.0 : offset,
+                    obj.data(), col_lower.data(), col_upper.data(), row_lower.data(), row_upper.data(),
                     a_start.data(), a_index.data(), a_value.data(), integrality.data(), col_value.data(), row_value.data(), &model_status);
 
             if (status == kHighsStatusError || model_status != kHighsModelStatusOptimal) {
+                return false;
+            }
+
+            sol.assign(2*n_world, 0.0);
+            objective = offset;
+            for (uint32_t j = 0; j < 2*n_world; ++j) {
+                sol[j] = std::round(col_value[j]);
+                objective += cost[j] * sol[j];
+            }
+
+            return true;
+        };
+
+        double best_objective = 1.0e30;
+        std::vector<double> best_solution;
+        int best_k = -1;
+
+        for (int k : valid_k) {
+            if (n_layer % k != 0) {
                 continue;
             }
 
-            double objective = offset;
-            for (HighsInt j = 0; j < n_cols; ++j) {
-                col_value[j] = std::round(col_value[j]);
-                objective += cost[j] * col_value[j];
+            std::vector<double> col_value;
+            double objective = 0.0;
+            if (!solve(k, -1.0, col_value, objective)) {
+                continue;
             }
 
             if (objective < best_objective) {
@@ -413,6 +468,19 @@ static bool assign_layers_to_devices(const std::vector<prima_device_info> & devs
                 best_solution  = col_value;
             }
             LOG_INF("k = %2d, obj = %7.1f, solution: %s | best_k = %2d, best_obj = %7.1f\n", k, objective, vec_to_str(col_value).c_str(), best_k, best_objective);
+        }
+
+        // the latency model is linear, so the optimum puts all layers on the cheapest device even when the others are almost as fast
+        // trade at most balance_tol of the predicted latency for a more even busy time of the devices
+        if (!best_solution.empty() && params.balance_tol > 0.0f) {
+            std::vector<double> sol;
+            double objective = 0.0;
+            if (solve(best_k, best_objective * (1.0 + params.balance_tol), sol, objective)) {
+                if (sol != best_solution) {
+                    LOG_INF("balance (tol = %.2f): obj = %7.1f, solution: %s\n", params.balance_tol, objective, vec_to_str(sol).c_str());
+                }
+                best_solution = std::move(sol);
+            }
         }
 
         if (best_solution.empty()) {

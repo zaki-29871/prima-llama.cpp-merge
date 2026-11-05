@@ -4955,6 +4955,16 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             params.n_cycles = value;
         }
     ).set_env("LLAMA_ARG_K"));
+    add_opt(common_arg(
+        {"--balance-tol"}, "F",
+        format("automatic layer assignment: accept up to this fraction of extra predicted latency to spread the layers more evenly over the devices, 0 = off (default: %.2f)", (double) params.balance_tol),
+        [](common_params & params, const std::string & value) {
+            params.balance_tol = std::stof(value);
+            if (params.balance_tol < 0.0f) {
+                throw std::invalid_argument("--balance-tol must be >= 0");
+            }
+        }
+    ).set_env("LLAMA_ARG_BALANCE_TOL"));
 
     return ctx_arg;
 }

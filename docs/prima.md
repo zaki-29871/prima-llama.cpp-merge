@@ -33,11 +33,18 @@ When `--n-layer-window` is not given, the nodes set up the ring before they load
 1. the master sends its `-c`, `-b`, `-ub` and `-np` values to all nodes, so the workers use the same values
 2. each node profiles its device: CPU and GPU matmul speed for the weight types of the model, KV copy time, RAM, swap, GPU memory and disk read speed of the model file. The master gathers the profiles and prints them
 3. the master solves the layer assignment of prima.cpp (an integer linear program over the layer window `w[m]` and the GPU layers `n[m]` of each device, and the number of cycles `k`) with HiGHS. Without HiGHS the layers are assigned by the RAM/VRAM size of each device in one cycle
-4. a device that gets only one layer is removed and the solver runs again with the remaining devices
-5. if devices are removed, each node connects to its next worker. If the next worker cannot be reached, the removed node in between stays as a forwarder that only passes the messages on. Other removed nodes exit
-6. the workers get new ranks `0..n-1` in the ring order, then all nodes load their layers
+4. balancing (not in prima.cpp, see below): among the assignments whose predicted latency is at most `--balance-tol` above the optimum, the master takes the one with the most even busy times of the devices
+5. a device that gets only one layer is removed and the solver runs again with the remaining devices
+6. if devices are removed, each node connects to its next worker. If the next worker cannot be reached, the removed node in between stays as a forwarder that only passes the messages on. Other removed nodes exit
+7. the workers get new ranks `0..n-1` in the ring order, then all nodes load their layers
 
 `n[m]` is the number of GPU layers per window: the last `n[m]` layers of each window of device `m` go to the GPU. If `-ngl` is given, it is used instead (also per window). The output layer runs on the master, see [GPU layers and the output layer](#gpu-layers-and-the-output-layer).
+
+### Balancing
+
+The latency model of prima.cpp is linear in the number of layers per device and counts only the compute time (the communication time is 0). The optimum of a linear program is an extreme point, so the solver puts all layers on the device that looks cheapest, even when another device is only 1% slower, and `--master-priority 1.01` breaks such ties in favor of the master. The other devices then get one layer and are removed by step 5. For example, with two identical CPU nodes the master gets 31 layers and the worker is removed, although in practice a 16 + 16 split was faster.
+
+The balancing step solves the same program a second time for the chosen `k`. Its constraints also limit the predicted latency to `(1 + balance_tol)` times the optimum, and it minimizes the sum of the squared busy times of the devices (the master also counts the output head). The squares are replaced by their tangent lines, so the program stays linear. A sum of squares spreads the layers over all devices that are about equally fast, also when one device has a large fixed cost, for example a slow master that runs the output head. When one device is clearly faster, the latency limit keeps the layers on it. When the devices are about equally fast, the layers are spread over them. `--balance-tol 0` turns this step off and gives the prima.cpp result.
 
 The solver uses a GPU only if it is a CUDA (or ROCm, MUSA) or a Metal device.
 
@@ -173,6 +180,7 @@ Options:
 | `--force` | with `--prefetch`, load the prefetched pages at once |
 | `-k, --n-cycles N` | number of cycles for the solver, 0 = try all (default) |
 | `--master-priority F` | weight of the master in the solver, > 1 puts more layers on the master (default 1.01) |
+| `--balance-tol F` | extra predicted latency the solver may accept to spread the layers more evenly, 0 = off (default 0.05) |
 | `-gm, --gpu-mem N` | GPU memory in GiB that the solver may use (default all) |
 
 | `--keep-out-in-cuda` | run the output layer on the CUDA GPU of the master |
