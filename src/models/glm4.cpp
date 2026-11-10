@@ -79,7 +79,13 @@ llama_model_glm4::graph::graph(const llama_model & model, const llm_graph_params
     inpL = build_inp_embd(model.tok_embd);
 
     bool use_mrope = hparams.use_mrope();
-    if (ubatch.embd && !use_mrope) {
+    if (pp_il1 == 0) {
+        build_pp_out(inpL);
+        return;
+    }
+
+    // prima.cpp: the hidden state from the previous window also comes in through ubatch.embd
+    if (ubatch.embd && !use_mrope && !cparams.pp_inp_hidden) {
         // unfortunately, we need to forcefully stop here, to avoid users complaining about wrong results
         GGML_ABORT("This GGUF does not support multimodal. Please reconvert it.");
     }
@@ -89,11 +95,11 @@ llama_model_glm4::graph::graph(const llama_model & model, const llm_graph_params
 
     auto * inp_attn = build_attn_inp_kv();
 
-    ggml_tensor * inp_out_ids = build_inp_out_ids();
+    ggml_tensor * inp_out_ids = pp_has_output() ? build_inp_out_ids() : nullptr;
 
     // Only process up to last layer (skip final NextN layer)
     // Final layer tensors are loaded but not processed in forward pass
-    for (int il = 0; il < n_layer; ++il) {
+    for (int il = pp_il0; il < pp_il1; ++il) {
         ggml_tensor * inpSA = inpL;
 
         // Pre-attention norm
@@ -170,6 +176,12 @@ llama_model_glm4::graph::graph(const llama_model & model, const llm_graph_params
         // input for next layer
         inpL = cur;
     }
+
+    if (!pp_has_output()) {
+        build_pp_out(inpL);
+        return;
+    }
+
     // Final norm
     cur = build_norm(inpL, model.output_norm, NULL, LLM_NORM_RMS, -1);
 

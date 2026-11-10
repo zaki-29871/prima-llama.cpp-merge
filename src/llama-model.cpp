@@ -2461,6 +2461,13 @@ void llama_model::pp_init() {
         case LLM_ARCH_QWEN3:
         case LLM_ARCH_GRANITE:
         case LLM_ARCH_GRANITE_MOE:
+        case LLM_ARCH_QWEN2MOE:
+        case LLM_ARCH_QWEN3MOE:
+        case LLM_ARCH_MISTRAL3:
+        case LLM_ARCH_PHI3:
+        case LLM_ARCH_GEMMA2:
+        case LLM_ARCH_GEMMA3:
+        case LLM_ARCH_GLM4:
             break;
         default:
             throw std::runtime_error(format("prima: distributed inference is not supported for arch %s", arch_name().c_str()));

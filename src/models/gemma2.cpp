@@ -65,17 +65,25 @@ llama_model_gemma2::graph::graph(const llama_model & model, const llm_graph_para
 
     inpL = build_inp_embd(model.tok_embd);
 
-    inpL = ggml_scale(ctx0, inpL, sqrtf(n_embd));
-    cb(inpL, "inp_scaled", -1);
+    // prima.cpp: the hidden state from the previous window is already scaled
+    if (!cparams.pp_inp_hidden) {
+        inpL = ggml_scale(ctx0, inpL, sqrtf(n_embd));
+        cb(inpL, "inp_scaled", -1);
+    }
+
+    if (pp_il1 == 0) {
+        build_pp_out(inpL);
+        return;
+    }
 
     // inp_pos - contains the positions
     ggml_tensor * inp_pos = build_inp_pos();
 
     auto * inp_attn = build_attn_inp_kv_iswa();
 
-    ggml_tensor * inp_out_ids = build_inp_out_ids();
+    ggml_tensor * inp_out_ids = pp_has_output() ? build_inp_out_ids() : nullptr;
 
-    for (int il = 0; il < n_layer; ++il) {
+    for (int il = pp_il0; il < pp_il1; ++il) {
         const float freq_base_l  = model.get_rope_freq_base (cparams, il);
         const float freq_scale_l = model.get_rope_freq_scale(cparams, il);
 
@@ -152,6 +160,11 @@ llama_model_gemma2::graph::graph(const llama_model & model, const llm_graph_para
         inpL = cur;
     }
     cur = inpL;
+
+    if (!pp_has_output()) {
+        build_pp_out(cur);
+        return;
+    }
 
     cur = build_norm(cur,
             model.output_norm, NULL,

@@ -75,6 +75,11 @@ llama_model_phi3::graph<iswa>::graph(const llama_model & model, const llm_graph_
 
     inpL = build_inp_embd(model.tok_embd);
 
+    if (pp_il1 == 0) {
+        build_pp_out(inpL);
+        return;
+    }
+
     // inp_pos - contains the positions
     ggml_tensor * inp_pos = build_inp_pos();
 
@@ -86,9 +91,9 @@ llama_model_phi3::graph<iswa>::graph(const llama_model & model, const llm_graph_
     } else {
         inp_attn = build_attn_inp_kv();
     }
-    ggml_tensor * inp_out_ids = build_inp_out_ids();
+    ggml_tensor * inp_out_ids = pp_has_output() ? build_inp_out_ids() : nullptr;
 
-    for (int il = 0; il < n_layer; ++il) {
+    for (int il = pp_il0; il < pp_il1; ++il) {
         auto * residual = inpL;
 
         // self-attention
@@ -171,6 +176,12 @@ llama_model_phi3::graph<iswa>::graph(const llama_model & model, const llm_graph_
         // input for next layer
         inpL = cur;
     }
+
+    if (!pp_has_output()) {
+        build_pp_out(inpL);
+        return;
+    }
+
     cur = build_norm(inpL,
             model.output_norm,
             model.output_norm_b,
