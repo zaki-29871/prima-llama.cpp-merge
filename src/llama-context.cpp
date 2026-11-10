@@ -228,6 +228,11 @@ llama_context::llama_context(
     cparams.yarn_beta_fast          = params.yarn_beta_fast   >= 0.0f ? params.yarn_beta_fast   : hparams.yarn_beta_fast;
     cparams.yarn_beta_slow          = params.yarn_beta_slow   >= 0.0f ? params.yarn_beta_slow   : hparams.yarn_beta_slow;
     cparams.embeddings              = params.embeddings;
+
+    // prima.cpp: only the master computes the output, the workers send the hidden state
+    if (model.pp_enabled() && model.pp_rank != 0) {
+        cparams.embeddings = false;
+    }
     cparams.embeddings_nextn        = false;
     cparams.embeddings_nextn_masked = false;
     cparams.offload_kqv             = params.offload_kqv;
@@ -516,8 +521,8 @@ llama_context::llama_context(
     }
 
     if (model.pp_enabled() && !hparams.vocab_only) {
-        if (cparams.embeddings || cparams.ctx_type != LLAMA_CONTEXT_TYPE_DEFAULT || hparams.n_pos_per_embd() != 1) {
-            throw std::runtime_error("prima: distributed inference supports only plain text generation contexts");
+        if (cparams.ctx_type != LLAMA_CONTEXT_TYPE_DEFAULT || hparams.n_pos_per_embd() != 1) {
+            throw std::runtime_error("prima: distributed inference supports only plain text contexts");
         }
 
         if (!model.no_alloc()) {

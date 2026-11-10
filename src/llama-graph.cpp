@@ -4107,7 +4107,7 @@ void llm_graph_context::build_dense_out(
     ggml_tensor * dense_2,
     ggml_tensor * dense_2_b,
     ggml_tensor * dense_3) const {
-    if (!cparams.embeddings || !(dense_2 || dense_2_b || dense_3)) {
+    if (!cparams.embeddings || !pp_has_output() || !(dense_2 || dense_2_b || dense_3)) {
         return;
     }
     ggml_tensor * cur = res->t_embd_pooled != nullptr ? res->t_embd_pooled : res->t_embd;
@@ -4134,7 +4134,8 @@ void llm_graph_context::build_pooling(
         ggml_tensor * cls_out,
         ggml_tensor * cls_out_b,
         ggml_tensor * cls_norm) const {
-    if (!cparams.embeddings) {
+    // prima.cpp: a graph of a window without the output layer outputs the hidden state
+    if (!cparams.embeddings || !pp_has_output()) {
         // a graph without logits still computes t_embd, so that it is never empty
         if (res->t_logits == nullptr && res->t_embd != nullptr) {
             ggml_build_forward_expand(gf, res->t_embd);

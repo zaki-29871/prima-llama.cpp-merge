@@ -144,6 +144,11 @@ int main(int argc, char ** argv) {
         return 1;
     }
 
+    // prima.cpp: a worker only serves its layers for the master
+    if (params.n_world > 1 && params.rank != 0) {
+        return ctx && llama_prima_worker_run(ctx) == 0 ? 0 : 1;
+    }
+
     const llama_vocab * vocab = llama_model_get_vocab(model);
 
     const int n_ctx_train = llama_model_n_ctx_train(model);
