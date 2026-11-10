@@ -21,10 +21,13 @@ Ported:
 - speculative decoding with a draft model or n-grams (`llama-server`, `llama-speculative`, `llama-speculative-simple`)
 - `llama-profile-tool`, the device profiler
 - `GGML_OP_READ`, the memory read op used by the profiler, on CPU, CUDA and Metal
-- supported architectures: `llama`, `qwen2`, `qwen3`, `granite`, `granite_moe` (this covers the Llama, Qwen 2.5, Qwen 3, QwQ, DeepSeek-R1 distill and Granite models)
-- supported tools: `llama-completion`, `llama-server`, `llama-cli`, `llama-speculative`, `llama-speculative-simple`
+- supported architectures: `llama`, `qwen2`, `qwen2moe`, `qwen3`, `qwen3moe`, `granite`, `granite_moe`, `mistral3`, `phi3`, `gemma2`, `gemma3`, `glm4` (this covers the Llama, Mistral, Qwen 2.5, Qwen 3 and Qwen 3 MoE, QwQ, DeepSeek-R1 distill, Granite, Phi-3/4, Gemma 2/3 and GLM-4 text models). Models with multi-position RoPE (M-RoPE) or nextn/MTP layers are not supported
+- embeddings (`llama-embedding`, `llama-server --embedding`), all pooling types: only the graph with the output layer pools the hidden state
+- saving and loading the state: session files (`--prompt-cache`), `llama_state_*` and `llama_state_seq_*`, and the `llama-server` prompt cache and context checkpoints. The master asks the workers for their part of the KV cache over the ring and stores it after its own part
+- graph reuse per window: a node with several windows keeps one graph per window
+- supported tools: `llama-completion`, `llama-server`, `llama-cli`, `llama-embedding`, `llama-speculative`, `llama-speculative-simple`
 
-Not ported yet: embeddings, and saving or loading the state (session files, the server prompt cache and slot save/restore).
+A saved state holds the KV cache of all nodes and loads only into a ring with the same number of nodes and the same layer windows.
 
 ## Automatic layer assignment
 

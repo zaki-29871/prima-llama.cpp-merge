@@ -23,7 +23,7 @@ struct llama_prima_window {
 };
 
 // throws on an invalid layout
-std::vector<llama_prima_window> llama_prima_make_windows(uint32_t n_layer, uint32_t n_world, const uint32_t * n_layer_window);
+LLAMA_API std::vector<llama_prima_window> llama_prima_make_windows(uint32_t n_layer, uint32_t n_world, const uint32_t * n_layer_window);
 
 enum llama_prima_msg_type : uint32_t {
     LLAMA_PRIMA_MSG_NONE = 0,

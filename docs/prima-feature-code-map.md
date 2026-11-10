@@ -29,12 +29,12 @@
 | 15 | llama-profile-tool | 已完成 | `prima.cpp/tools/profile_tool.cpp` | `tools/profile-tool/profile-tool.cpp` |
 | 16 | GGML_OP_READ | 部分完成 | `prima.cpp/ggml/src/ggml-cuda/read.cu`、`prima.cpp/ggml/src/ggml-metal.metal:3278` | `ggml/src/ggml.c:2577`、`ggml/src/ggml-cpu/ops.cpp:1588`、`ggml/src/ggml-cuda/read.cu` |
 | 17 | Makefile 建置選項轉 CMake | 已完成 | `prima.cpp/Makefile:273`、`280` | `CMakeLists.txt:147`、`231`–`354` |
-| 18 | 支援模型架構 | 已完成 | `prima.cpp/src/llama.cpp:11000` `build_llama`、`12736` `build_qwen2` | `src/models/{llama,qwen2,qwen3,granite}.cpp`、`src/llama-model.cpp:2457` |
+| 18 | 支援模型架構 | 已完成 | `prima.cpp/src/llama.cpp:11000` `build_llama`、`12736` `build_qwen2` | `src/models/{llama,qwen2,qwen3,granite,qwen2moe,qwen3moe,mistral3,phi3,gemma2,gemma3,glm4}.cpp`、`src/llama-model.cpp:2459` |
 | 19 | 支援工具 | 已完成 | `prima.cpp/examples/main/main.cpp:146` | `tools/completion/completion.cpp:177` 等 |
-| 20 | 嵌入向量（embedding） | 未實作 | `prima.cpp/src/llama.cpp:18604` | — |
-| 21 | 推論狀態儲存與載入 | 未實作 | `prima.cpp/src/llama.cpp:22771`、`22780` | `src/llama-context.cpp:3997`（回報錯誤） |
-| 22 | 獨立 signal port 與 master IP | 未實作 | `prima.cpp/src/llama.cpp:20492`、`20887` | `common/arg.cpp:4878`、`4899`（僅解析） |
-| 23 | 其他模型架構 | 未實作 | `prima.cpp/src/llama.cpp:17003`（`llama_build_graph` 的架構檢查） | `src/llama-model.cpp:2457`–`2466`（拒絕） |
+| 20 | 嵌入向量（embedding） | 已完成 | `prima.cpp/src/llama.cpp:18604` | `src/llama-graph.cpp:4137`、`src/llama-context.cpp:232`、`examples/embedding/embedding.cpp:147` |
+| 21 | 推論狀態儲存與載入 | 已完成 | `prima.cpp/src/llama.cpp:22771`、`22780` | `src/llama-context.cpp:4149`–`4260`、`src/llama-prima.cpp:367` |
+| 22 | 獨立 signal port 與 master IP | 已移除 | `prima.cpp/src/llama.cpp:20492`、`20887` | 控制訊息改走資料環 |
+| 23 | 其他模型架構 | 部分完成 | `prima.cpp/src/llama.cpp:17003`（`llama_build_graph` 的架構檢查） | `src/llama-model.cpp:2459`（第 18 項以外的架構仍拒絕） |
 | 24 | Vulkan 等其他 GPU 後端 | 未實作 | `prima.cpp/common/profiler.cpp:1343` 等 | `common/prima-profiler.cpp:657`–`661` |
 | 25 | Windows 與 Android 實機測試 | 部分完成 | `prima.cpp/common/profiler.cpp:496`、`1491` | `common/prima-profiler.cpp:238`–`245`、`289`、`416` |
 
@@ -373,7 +373,7 @@ ZeroMQ、HiGHS、prima 建置目標。狀態：**已完成**（HiGHS 連結未�
 
 ## 18. 支援模型架構
 
-llama、qwen2、qwen3、granite、granite_moe。狀態：**已完成**。
+llama、qwen2、qwen2moe、qwen3、qwen3moe、granite、granite_moe、mistral3、phi3、gemma2、gemma3、glm4。狀態：**已完成**（以隨機權重的 12 層測試模型比對單機與 3 節點輸出，結果一致）。
 
 | 原版 | 說明 |
 |------|------|
@@ -389,10 +389,11 @@ llama、qwen2、qwen3、granite、granite_moe。狀態：**已完成**。
 | `src/models/qwen2.cpp:64`–`76`、`142` | qwen2 |
 | `src/models/qwen3.cpp:59`、`81`–`93`、`167` | qwen3 |
 | `src/models/granite.cpp:138`–`152`、`194` | granite（granite_moe 共用） |
+| `src/models/{qwen2moe,qwen3moe,mistral3,phi3,gemma2,gemma3,glm4}.cpp` | 同樣只跑指定層範圍；gemma2 只對 token embedding 縮放，glm4 不把 hidden state 當成多模態輸入 |
 
 ## 19. 支援工具
 
-completion、server、cli、speculative、speculative-simple。狀態：**已完成**。
+completion、server、cli、embedding、speculative、speculative-simple。狀態：**已完成**。
 
 | 原版 | 說明 |
 |------|------|
@@ -406,10 +407,11 @@ completion、server、cli、speculative、speculative-simple。狀態：**已完
 | `tools/server/server.cpp:574`、`613` | llama-server |
 | `examples/speculative/speculative.cpp:93` | llama-speculative |
 | `examples/speculative-simple/speculative-simple.cpp:52` | llama-speculative-simple |
+| `examples/embedding/embedding.cpp:147` | llama-embedding |
 
 ## 20. 嵌入向量（embedding）
 
-分散式模式下輸出 embedding。狀態：**未實作**。
+分散式模式下輸出 embedding。狀態：**已完成**（所有 pooling 類型與單機結果一致）。
 
 | 原版 | 說明 |
 |------|------|
@@ -417,11 +419,13 @@ completion、server、cli、speculative、speculative-simple。狀態：**已完
 
 | 移植 | 說明 |
 |------|------|
-| — | 尚未移植 |
+| `src/llama-graph.cpp:4137` | 只有含輸出層的 graph 做 pooling，其他窗口輸出 hidden state |
+| `src/llama-context.cpp:232` | worker 不輸出 embedding |
+| `examples/embedding/embedding.cpp:147` | llama-embedding 非主節點執行 worker 迴圈 |
 
 ## 21. 推論狀態儲存與載入
 
-session 檔、server prompt cache、slot 儲存／還原。狀態：**未實作**（分散式模式下會明確回報錯誤）。
+session 檔、server prompt cache、slot 儲存／還原。狀態：**已完成**（儲存的狀態只能載入到節點數與層窗口相同的環）。
 
 | 原版 | 說明 |
 |------|------|
@@ -430,8 +434,10 @@ session 檔、server prompt cache、slot 儲存／還原。狀態：**未實作*
 
 | 移植 | 說明 |
 |------|------|
-| `src/llama-context.cpp:3997`、`4021`、`4051`、`4063` | `state_*_data()` 在分散式模式下拋出錯誤 |
-| `tools/server/server-context.cpp:1573`–`1581` | 關閉 server prompt cache 與 checkpoint |
+| `src/llama-context.cpp:4149` `pp_state_write` | 主節點透過環向 worker 收集 KV cache，接在自己的狀態後面 |
+| `src/llama-context.cpp:4188` `pp_state_read` | 主節點把各 worker 的部分送回去載入 |
+| `src/llama-context.cpp:4230` `pp_state_apply`、`1945` | worker 加入或載入自己的部分 |
+| `src/llama-prima.cpp:367` | `LLAMA_PRIMA_MSG_STATE` 訊息 |
 
 ## 22. 獨立 signal port 與 master IP
 
@@ -450,7 +456,7 @@ session 檔、server prompt cache、slot 儲存／還原。狀態：**未實作*
 
 ## 23. 其他模型架構
 
-上述五種以外的架構。狀態：**未實作**（分散式模式下會拒絕）。
+第 18 項以外的架構。狀態：**部分完成**（其他架構、M-RoPE 與 nextn/MTP 模型在分散式模式下仍會拒絕）。
 
 | 原版 | 說明 |
 |------|------|
@@ -459,7 +465,7 @@ session 檔、server prompt cache、slot 儲存／還原。狀態：**未實作*
 
 | 移植 | 說明 |
 |------|------|
-| `src/llama-model.cpp:2463`–`2473` | 不支援的架構、deepstack 與 nextn/MTP 模型一律拒絕 |
+| `src/llama-model.cpp:2459` 起 | 不支援的架構、deepstack 與 nextn/MTP 模型一律拒絕 |
 
 ## 24. Vulkan 等其他 GPU 後端
 
