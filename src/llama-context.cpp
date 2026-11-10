@@ -812,6 +812,7 @@ void llama_context::sched_reserve() {
     for (auto & res : gf_res_prev) {
         res.reset();
     }
+    pp_gf_res.clear();
     gf_res_reserve.reset(new llm_graph_result(max_nodes));
     gf_res_prev_active = nullptr;
 
@@ -1054,6 +1055,9 @@ bool llama_context::memory_update(bool optimize) {
             if (res) {
                 res->reset();
             }
+        }
+        for (auto & [_, res] : pp_gf_res) {
+            res->reset();
         }
         gf_res_prev_active = nullptr;
 
@@ -1605,6 +1609,43 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
         if (cparams.pipeline_parallel) {
             ggml_backend_sched_synchronize(sched.get());
         }
+
+        n_reused++;
+    } else if (!graph_reuse_disable && model.pp_enabled() && res->can_reuse(gparams)) {
+        // prima.cpp: the graph of this window is still valid, but another window used the scheduler since then
+        // drop the old compute buffer addresses, so that the scheduler places the tensors again
+        gf_res_prev_active = nullptr;
+
+        auto is_compute = [](const ggml_tensor * t) {
+            return t && t->buffer && ggml_backend_buffer_get_usage(t->buffer) == GGML_BACKEND_BUFFER_USAGE_COMPUTE;
+        };
+        auto clear = [&](ggml_tensor * t) {
+            if (is_compute(t) || (t->view_src && (is_compute(t->view_src) || t->view_src->buffer == nullptr))) {
+                t->data   = nullptr;
+                t->buffer = nullptr;
+            }
+        };
+        // the leafs are reached through the sources of the nodes
+        for (int i = 0; i < ggml_graph_n_nodes(gf); ++i) {
+            ggml_tensor * node = ggml_graph_node(gf, i);
+            for (int j = 0; j < GGML_MAX_SRC; ++j) {
+                if (node->src[j]) {
+                    clear(node->src[j]);
+                }
+            }
+            clear(node);
+        }
+
+        ggml_backend_sched_reset(sched.get());
+        ggml_backend_sched_set_eval_callback(sched.get(), cparams.cb_eval, cparams.cb_eval_user_data);
+
+        if (!ggml_backend_sched_alloc_graph(sched.get(), gf)) {
+            LLAMA_LOG_ERROR("%s: failed to allocate graph\n", __func__);
+            ret = GGML_STATUS_ALLOC_FAILED;
+            return nullptr;
+        }
+
+        gf_res_prev_active = res;
 
         n_reused++;
     } else {
@@ -2942,6 +2983,15 @@ llm_graph_result * llama_context::get_gf_res_reserve() const {
 }
 
 llm_graph_result * llama_context::get_gf_res_prev() {
+    if (model.pp_enabled()) {
+        const uint64_t key = (uint64_t) (cparams.pp_il0 + 1) << 2 | (uint64_t) cparams.pp_inp_hidden << 1 | (n_outputs > 0);
+        auto & res = pp_gf_res[key];
+        if (!res) {
+            res.reset(new llm_graph_result(gf_res_reserve->get_max_nodes()));
+        }
+        return res.get();
+    }
+
     auto & res = gf_res_prev[n_outputs > 0];
     if (!res) {
         res.reset(new llm_graph_result(gf_res_reserve->get_max_nodes()));
@@ -3023,6 +3073,9 @@ ggml_cgraph * llama_context::graph_reserve(
         if (res) {
             res->reset();
         }
+    }
+    for (auto & [_, res] : pp_gf_res) {
+        res->reset();
     }
     gf_res_prev_active = nullptr;
 

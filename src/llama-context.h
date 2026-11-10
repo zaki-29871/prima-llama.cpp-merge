@@ -445,6 +445,9 @@ private:
     std::array<llm_graph_result_ptr, 2> gf_res_prev;
     llm_graph_result_ptr gf_res_reserve;
 
+    // prima.cpp: one graph per window, so that a node with several windows can reuse them
+    std::map<uint64_t, llm_graph_result_ptr> pp_gf_res;
+
     llm_graph_result * gf_res_prev_active = nullptr;
 
     // host buffer for the model output (logits and embeddings)
