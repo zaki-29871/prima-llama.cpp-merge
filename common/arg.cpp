@@ -918,6 +918,19 @@ static bool common_params_parse_ex(int argc, char ** argv, common_params_context
         params.mmproj_use_gpu = params.mmproj_device != nullptr;
     }
 
+    if (params.n_world < 1 || params.n_world > 32) {
+        throw std::invalid_argument("error: --world must be in [1, 32]\n");
+    }
+    if (params.rank < 0 || params.rank >= params.n_world) {
+        throw std::invalid_argument("error: --rank must be in [0, --world)\n");
+    }
+    {
+        const int n_lw = std::count_if(std::begin(params.n_layer_window), std::end(params.n_layer_window), [](uint32_t n) { return n > 0; });
+        if (n_lw != 0 && n_lw != params.n_world) {
+            throw std::invalid_argument("error: the number of values in --n-layer-window must equal --world\n");
+        }
+    }
+
     if (params.prompt_cache_all && (params.interactive || params.interactive_first)) {
         throw std::invalid_argument("error: --prompt-cache-all not supported in interactive mode yet\n");
     }
@@ -4825,21 +4838,24 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
 
-        // prima.cpp's options.
+    // prima.cpp piped-ring parallelism
+    const std::initializer_list<enum llama_example> prima_examples = {
+        LLAMA_EXAMPLE_COMPLETION, LLAMA_EXAMPLE_CLI, LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_SPECULATIVE, LLAMA_EXAMPLE_EMBEDDING,
+    };
     add_opt(common_arg(
         {"-w", "--world", "--world-size"}, "N",
         format("number of devices to use (default: %d)", params.n_world),
         [](common_params & params, int value) {
             params.n_world = value;
         }
-    ).set_env("LLAMA_ARG_N_WORLD"));
+    ).set_examples(prima_examples).set_env("LLAMA_ARG_N_WORLD"));
     add_opt(common_arg(
-        {"-r", "--rank", "--my-rank"}, "N",
+        {"--rank", "--my-rank"}, "N",
         format("my rank for distributed inference (default: %d)", params.rank),
         [](common_params & params, int value) {
             params.rank = value;
         }
-    ).set_env("LLAMA_ARG_RANK"));
+    ).set_examples(prima_examples).set_env("LLAMA_ARG_RANK"));
     add_opt(common_arg(
         {"-lw", "--layer-window", "--n-layer-window"}, "N",
         format("number of layers to process in each compute (e.g., 16,16)"),
@@ -4873,49 +4889,35 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
 
             std::copy(std::begin(result), std::end(result), params.n_layer_window);
         }
-    ).set_env("LLAMA_ARG_N_LAYER_WINDOW"));
-    add_opt(common_arg(
-        {"-mip", "--master", "--master-ip"}, "IPAddress",
-        format("ip address of the master node (default: %s)", params.master_ip.c_str()),
-        [](common_params & params, const std::string & value) {
-            params.master_ip = value;
-        }
-    ).set_env("LLAMA_ARG_MASTER_IP"));
+    ).set_examples(prima_examples).set_env("LLAMA_ARG_N_LAYER_WINDOW"));
     add_opt(common_arg(
         {"-nip", "--next", "--next-node", "--next-ip", "--next-node-ip"}, "IPAddress",
         format("ip address of the next node (default: %s)", params.next_node_ip.c_str()),
         [](common_params & params, const std::string & value) {
             params.next_node_ip = value;
         }
-    ).set_env("LLAMA_ARG_NEXT_NODE_IP"));
+    ).set_examples(prima_examples).set_env("LLAMA_ARG_NEXT_NODE_IP"));
     add_opt(common_arg(
         {"--data-port"}, "N",
         format("data port for distributed inference (default: %d)", params.data_port),
         [](common_params & params, int value) {
             params.data_port = value;
         }
-    ).set_env("LLAMA_ARG_DATA_PORT"));
-    add_opt(common_arg(
-        {"--signal-port"}, "N",
-        format("signal port for distributed inference (default: %d)", params.signal_port),
-        [](common_params & params, int value) {
-            params.signal_port = value;
-        }
-    ).set_env("LLAMA_ARG_SIGNAL_PORT"));
+    ).set_examples(prima_examples).set_env("LLAMA_ARG_DATA_PORT"));
     add_opt(common_arg(
         {"--prefetch"},
         format("whether to prefetch layer weights (default: %s)", params.prefetch ? "true" : "false"),
         [](common_params & params) {
             params.prefetch = true;
         }
-    ).set_env("LLAMA_ARG_PREFETCH"));
+    ).set_examples(prima_examples).set_env("LLAMA_ARG_PREFETCH"));
     add_opt(common_arg(
         {"--keep-out-in-cuda"},
         format("with --world > 1, run the output layer on the CUDA (or other non-Metal) GPU of the master (default: %s)", params.keep_out_in_cuda ? "true" : "false"),
         [](common_params & params) {
             params.keep_out_in_cuda = true;
         }
-    ).set_env("LLAMA_ARG_KEEP_OUT_IN_CUDA"));
+    ).set_examples(prima_examples).set_env("LLAMA_ARG_KEEP_OUT_IN_CUDA"));
     add_opt(common_arg(
         {"--keep-out-in-metal"},
         {"--no-keep-out-in-metal"},
@@ -4923,21 +4925,21 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         [](common_params & params, bool value) {
             params.keep_out_in_metal = value;
         }
-    ).set_env("LLAMA_ARG_KEEP_OUT_IN_METAL"));
+    ).set_examples(prima_examples).set_env("LLAMA_ARG_KEEP_OUT_IN_METAL"));
     add_opt(common_arg(
         {"--force"},
         format("force to start prefetching after computation (default: %s)", params.force ? "true" : "false"),
         [](common_params & params) {
             params.force = true;
         }
-    ).set_env("LLAMA_ARG_FORCE"));
+    ).set_examples(prima_examples).set_env("LLAMA_ARG_FORCE"));
     add_opt(common_arg(
         {"--master-priority"}, "N",
         format("priority to assign workload to the master (default: %f, set 1.01 to use master first, and 0.99 to offload to other devices)", params.master_priority),
         [](common_params & params, const std::string & value) {
             params.master_priority = std::stof(value);
         }
-    ).set_env("LLAMA_ARG_MASTER_PRIORITY"));
+    ).set_examples(prima_examples).set_env("LLAMA_ARG_MASTER_PRIORITY"));
     add_opt(common_arg(
         {"-gm", "--gpu-mem"}, "N", 
         format("maximum GPU memory to use (default: %d)", params.gpu_mem),
@@ -4947,14 +4949,14 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
                 LOG_WRN("WARN: Set --gpu-mem to 0 may lead to errors during workload distribution.\n");
             }
         }
-    ).set_env("LLAMA_ARG_CUDA_MEM"));
+    ).set_examples(prima_examples).set_env("LLAMA_ARG_CUDA_MEM"));
     add_opt(common_arg(
         {"-k", "--n-cycles"}, "N",
         format("number of cycles to output one token (default: %d)", params.n_cycles),
         [](common_params & params, int value) {
             params.n_cycles = value;
         }
-    ).set_env("LLAMA_ARG_K"));
+    ).set_examples(prima_examples).set_env("LLAMA_ARG_K"));
     add_opt(common_arg(
         {"--balance-tol"}, "F",
         format("automatic layer assignment: accept up to this fraction of extra predicted latency to spread the layers more evenly over the devices, 0 = off (default: %.2f)", (double) params.balance_tol),
@@ -4964,7 +4966,7 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
                 throw std::invalid_argument("--balance-tol must be >= 0");
             }
         }
-    ).set_env("LLAMA_ARG_BALANCE_TOL"));
+    ).set_examples(prima_examples).set_env("LLAMA_ARG_BALANCE_TOL"));
 
     return ctx_arg;
 }

@@ -435,7 +435,7 @@ session 檔、server prompt cache、slot 儲存／還原。狀態：**未實作*
 
 ## 22. 獨立 signal port 與 master IP
 
-原版 `--signal-port`、`--master` 參數。狀態：**未實作**（參數可解析但目前未使用，控制訊息改走資料環）。
+原版 `--signal-port`、`--master` 參數。狀態：**已移除**（控制訊息改走資料環，不需要這兩個參數）。
 
 | 原版 | 說明 |
 |------|------|
@@ -446,7 +446,6 @@ session 檔、server prompt cache、slot 儲存／還原。狀態：**未實作*
 
 | 移植 | 說明 |
 |------|------|
-| `common/arg.cpp:4878` / `4899` | 參數只解析，未使用 |
 | `src/llama-prima.cpp:338`、`344` | 停止與控制訊息改走資料環（`send_stop`、`send_ctl`） |
 
 ## 23. 其他模型架構

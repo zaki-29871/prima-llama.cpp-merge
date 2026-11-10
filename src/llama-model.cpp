@@ -1902,7 +1902,8 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
         }
     }
 
-    ml.done_getting_tensors();
+    // prima.cpp: the optional tensors of the layers of other nodes are never asked for, so the count is partial
+    ml.done_getting_tensors(pp_enabled());
 
     if (per_layer_tok_embd && ml.lazy.has(per_layer_tok_embd)) {
         LLAMA_LOG_INFO("%s: enabling prefetch for '%s'\n", __func__, per_layer_tok_embd->name);

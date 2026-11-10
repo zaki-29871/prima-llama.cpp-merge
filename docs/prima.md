@@ -172,7 +172,7 @@ Options:
 | option | description |
 |--------|-------------|
 | `-w, --world N` | number of nodes |
-| `-r, --rank N` | rank of this node, 0 is the master |
+| `--rank N` | rank of this node, 0 is the master |
 | `-lw, --n-layer-window A,B,...` | layers per node in each cycle, indexed by rank |
 | `-nip, --next IP` | ip address of the next node in the ring |
 | `--data-port N` | base data port (default 9000), node `r` listens on `data_port + r` |
@@ -182,8 +182,9 @@ Options:
 | `--master-priority F` | weight of the master in the solver, > 1 puts more layers on the master (default 1.01) |
 | `--balance-tol F` | extra predicted latency the solver may accept to spread the layers more evenly, 0 = off (default 0.05) |
 | `-gm, --gpu-mem N` | GPU memory in GiB that the solver may use (default all) |
-
 | `--keep-out-in-cuda` | run the output layer on the CUDA GPU of the master |
 | `--[no-]keep-out-in-metal` | run the output layer on the Metal GPU of the master (default on) |
 
-`--master` and `--signal-port` of prima.cpp are accepted, but this port does not use them.
+The `--master` and `--signal-port` options of prima.cpp are not available: the control messages go over the data ring. `--rank` has no short form, `-r` is `--reverse-prompt`.
+
+The options are available in `llama-completion`, `llama-cli`, `llama-server`, `llama-speculative`, `llama-speculative-simple` and `llama-embedding`.
