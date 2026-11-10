@@ -335,6 +335,13 @@ private:
 
     void pp_set_window(int32_t il0, int32_t il1, bool inp_hidden);
 
+    // master: add the memory state of the workers after its own state, or read it
+    void pp_state_write(llama_io_write_i & io, llama_seq_id seq_id, llama_state_seq_flags flags);
+    void pp_state_read (llama_io_read_i  & io, llama_seq_id seq_id, llama_state_seq_flags flags);
+
+    // worker: add its memory state to the message, or read it
+    void pp_state_apply(llama_prima_state & st);
+
     // copy the hidden state from the graph output, rows in ubatch order
     void pp_get_hidden(llm_graph_result * res, uint32_t n_tokens, std::vector<float> & dst);
     llama_moe_cache_ptr moe_cache;

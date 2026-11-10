@@ -30,7 +30,23 @@ enum llama_prima_msg_type : uint32_t {
     LLAMA_PRIMA_MSG_DATA = 1, // hidden state of a ubatch
     LLAMA_PRIMA_MSG_OPS  = 2, // memory operations
     LLAMA_PRIMA_MSG_STOP = 3,
-    LLAMA_PRIMA_MSG_CTL  = 4, // setup messages (device info, layer setup, topology)
+    LLAMA_PRIMA_MSG_CTL   = 4, // setup messages (device info, layer setup, topology)
+    LLAMA_PRIMA_MSG_STATE = 5, // memory state of the workers, goes around the ring back to the master
+};
+
+enum llama_prima_state_op : uint32_t {
+    LLAMA_PRIMA_STATE_GET      = 0, // each worker adds its memory state
+    LLAMA_PRIMA_STATE_GET_SIZE = 1, // each worker adds the size of its memory state
+    LLAMA_PRIMA_STATE_SET      = 2, // each worker reads its memory state and replaces it with a status byte
+};
+
+struct llama_prima_state {
+    uint32_t     op     = LLAMA_PRIMA_STATE_GET;
+    llama_seq_id seq_id = -1; // -1 = all sequences
+    uint32_t     flags  = 0;
+
+    std::vector<uint32_t>             ranks;
+    std::vector<std::vector<uint8_t>> blobs; // one per rank
 };
 
 enum llama_prima_op_type : int32_t {
@@ -78,9 +94,10 @@ public:
     void send_ops (const std::vector<llama_prima_op> & ops);
     void send_stop();
     void send_ctl (const void * data, size_t size);
+    void send_state(const llama_prima_state & state);
 
     // blocking, returns the message type
-    llama_prima_msg_type recv(llama_prima_data & data, std::vector<llama_prima_op> & ops);
+    llama_prima_msg_type recv(llama_prima_data & data, std::vector<llama_prima_op> & ops, llama_prima_state * state = nullptr);
 
     // blocking, throws if the message is not a setup message
     std::vector<uint8_t> recv_ctl();

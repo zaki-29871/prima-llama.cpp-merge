@@ -231,7 +231,7 @@ void llama_prima_net::forward() {
     }
 }
 
-llama_prima_msg_type llama_prima_net::recv(llama_prima_data & data, std::vector<llama_prima_op> & ops) {
+llama_prima_msg_type llama_prima_net::recv(llama_prima_data & data, std::vector<llama_prima_op> & ops, llama_prima_state * state) {
     const auto parts = recv_parts();
 
     if (parts.empty() || parts[0].size() != sizeof(msg_header)) {
@@ -267,6 +267,20 @@ llama_prima_msg_type llama_prima_net::recv(llama_prima_data & data, std::vector<
             {
                 read_part(1, ops, hdr.n_ops);
             } break;
+        case LLAMA_PRIMA_MSG_STATE:
+            {
+                if (!state) {
+                    throw std::runtime_error("prima: received an unexpected state message");
+                }
+                state->op     = hdr.window;
+                state->seq_id = (llama_seq_id) hdr.n_tokens;
+                state->flags  = hdr.n_seq_ids;
+                read_part(1, state->ranks, hdr.n_ops);
+                if (parts.size() != 2 + (size_t) hdr.n_ops) {
+                    throw std::runtime_error("prima: received a malformed state message");
+                }
+                state->blobs.assign(parts.begin() + 2, parts.end());
+            } break;
         case LLAMA_PRIMA_MSG_STOP:
         case LLAMA_PRIMA_MSG_CTL:
             break;
@@ -301,7 +315,7 @@ void llama_prima_net::forward() {
     throw std::runtime_error("prima: llama was built without ZeroMQ");
 }
 
-llama_prima_msg_type llama_prima_net::recv(llama_prima_data &, std::vector<llama_prima_op> &) {
+llama_prima_msg_type llama_prima_net::recv(llama_prima_data &, std::vector<llama_prima_op> &, llama_prima_state *) {
     throw std::runtime_error("prima: llama was built without ZeroMQ");
 }
 
@@ -348,6 +362,22 @@ void llama_prima_net::send_ctl(const void * data, size_t size) {
         { &hdr, sizeof(hdr) },
         { data, size },
     });
+}
+
+void llama_prima_net::send_state(const llama_prima_state & state) {
+    GGML_ASSERT(state.ranks.size() == state.blobs.size());
+
+    const msg_header hdr = { LLAMA_PRIMA_MSG_STATE, state.op, (uint32_t) state.seq_id, state.flags, 0, (uint32_t) state.ranks.size() };
+
+    std::vector<std::pair<const void *, size_t>> parts = {
+        { &hdr,               sizeof(hdr) },
+        { state.ranks.data(), state.ranks.size()*sizeof(uint32_t) },
+    };
+    for (const auto & blob : state.blobs) {
+        parts.emplace_back(blob.data(), blob.size());
+    }
+
+    send_parts(parts);
 }
 
 std::vector<uint8_t> llama_prima_net::recv_ctl() {

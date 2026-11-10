@@ -1939,7 +1939,15 @@ int32_t llama_context::pp_worker_run() {
             llama_prima_data data;
             std::vector<llama_prima_op> ops;
 
-            switch (pp_net->recv(data, ops)) {
+            llama_prima_state st;
+
+            switch (pp_net->recv(data, ops, &st)) {
+                case LLAMA_PRIMA_MSG_STATE:
+                    {
+                        // the state message always goes back to the master
+                        pp_state_apply(st);
+                        pp_net->send_state(st);
+                    } break;
                 case LLAMA_PRIMA_MSG_STOP:
                     {
                         // always forward the stop, forwarder nodes between this node and the master wait for it
@@ -3846,6 +3854,11 @@ size_t llama_context::state_set_data(const uint8_t * src, size_t size) {
 static constexpr uint32_t io_magic = 0xaf143cd8;
 
 size_t llama_context::state_seq_get_size(llama_seq_id seq_id, llama_state_seq_flags flags) {
+    // prima.cpp: the state of the workers comes over the ring, keep it in host memory
+    if (pp_net) {
+        flags &= ~LLAMA_STATE_SEQ_FLAGS_ON_DEVICE;
+    }
+
     llama_io_write_dummy io(flags & LLAMA_STATE_SEQ_FLAGS_ON_DEVICE);
     try {
         io.write(&io_magic, sizeof(io_magic));
@@ -3859,6 +3872,11 @@ size_t llama_context::state_seq_get_size(llama_seq_id seq_id, llama_state_seq_fl
 }
 
 size_t llama_context::state_seq_get_data(llama_seq_id seq_id, uint8_t * dst, size_t size, llama_state_seq_flags flags) {
+    // prima.cpp: the state of the workers comes over the ring, keep it in host memory
+    if (pp_net) {
+        flags &= ~LLAMA_STATE_SEQ_FLAGS_ON_DEVICE;
+    }
+
     std::unique_ptr<llama_io_write_i> io;
     if (flags & LLAMA_STATE_SEQ_FLAGS_ON_DEVICE) {
         io = std::make_unique<llama_io_write_device>(dst, size, mem_storage[seq_id]);
@@ -3878,6 +3896,11 @@ size_t llama_context::state_seq_get_data(llama_seq_id seq_id, uint8_t * dst, siz
 }
 
 size_t llama_context::state_seq_set_data(llama_seq_id seq_id, const uint8_t * src, size_t size, llama_state_seq_flags flags) {
+    // prima.cpp: the state of the workers comes over the ring, keep it in host memory
+    if (pp_net) {
+        flags &= ~LLAMA_STATE_SEQ_FLAGS_ON_DEVICE;
+    }
+
     std::unique_ptr<llama_io_read_i> io;
     if (flags & LLAMA_STATE_SEQ_FLAGS_ON_DEVICE) {
         // create a temporary io to read the magic and the src seq_id
@@ -4052,10 +4075,6 @@ size_t llama_context::state_seq_save_file(llama_seq_id seq_id, const char * file
 }
 
 size_t llama_context::state_write_data(llama_io_write_i & io) {
-    if (model.pp_enabled()) {
-        throw std::runtime_error("prima: saving and loading the state is not supported with n_world > 1");
-    }
-
     LLAMA_LOG_DEBUG("%s: writing state\n", __func__);
 
     // write model info
@@ -4072,14 +4091,12 @@ size_t llama_context::state_write_data(llama_io_write_i & io) {
         memory->state_write(io);
     }
 
+    pp_state_write(io, -1, 0);
+
     return io.n_bytes();
 }
 
 size_t llama_context::state_read_data(llama_io_read_i & io) {
-    if (model.pp_enabled()) {
-        throw std::runtime_error("prima: saving and loading the state is not supported with n_world > 1");
-    }
-
     LLAMA_LOG_DEBUG("%s: reading state\n", __func__);
 
     // read model info
@@ -4102,31 +4119,152 @@ size_t llama_context::state_read_data(llama_io_read_i & io) {
         memory->state_read(io);
     }
 
+    pp_state_read(io, -1, 0);
+
     return io.n_bytes();
 }
 
 size_t llama_context::state_seq_write_data(llama_io_write_i & io, llama_seq_id seq_id, llama_state_seq_flags flags) {
-    if (model.pp_enabled()) {
-        throw std::runtime_error("prima: saving and loading the state is not supported with n_world > 1");
-    }
-
     if (memory) {
         memory->state_write(io, seq_id, flags);
     }
+
+    pp_state_write(io, seq_id, flags);
 
     return io.n_bytes();
 }
 
 size_t llama_context::state_seq_read_data(llama_io_read_i & io, llama_seq_id seq_id, llama_state_seq_flags flags) {
-    if (model.pp_enabled()) {
-        throw std::runtime_error("prima: saving and loading the state is not supported with n_world > 1");
-    }
-
     if (memory) {
         memory->state_read(io, seq_id, flags);
     }
 
+    pp_state_read(io, seq_id, flags);
+
     return io.n_bytes();
+}
+
+// prima.cpp: the master stores the memory state of the workers after its own state
+// layout: n_workers, then for each worker: rank, size, data
+void llama_context::pp_state_write(llama_io_write_i & io, llama_seq_id seq_id, llama_state_seq_flags flags) {
+    if (!pp_net || model.pp_rank != 0) {
+        return;
+    }
+
+    pp_net->flush_ops();
+
+    // the dummy writer only counts the bytes, so the workers only send their sizes
+    const bool size_only = dynamic_cast<llama_io_write_dummy *>(&io) != nullptr;
+
+    llama_prima_state st;
+    st.op     = size_only ? LLAMA_PRIMA_STATE_GET_SIZE : LLAMA_PRIMA_STATE_GET;
+    st.seq_id = seq_id;
+    st.flags  = flags;
+    pp_net->send_state(st);
+
+    llama_prima_data data;
+    std::vector<llama_prima_op> ops;
+    if (pp_net->recv(data, ops, &st) != LLAMA_PRIMA_MSG_STATE) {
+        throw std::runtime_error("prima: unexpected message while waiting for the state of the workers");
+    }
+
+    const uint32_t n = st.ranks.size();
+    io.write(&n, sizeof(n));
+    for (uint32_t i = 0; i < n; ++i) {
+        uint64_t size = st.blobs[i].size();
+        if (size_only) {
+            if (size != sizeof(uint64_t)) {
+                throw std::runtime_error("prima: malformed state size from a worker");
+            }
+            memcpy(&size, st.blobs[i].data(), sizeof(size));
+        }
+
+        io.write(&st.ranks[i], sizeof(st.ranks[i]));
+        io.write(&size, sizeof(size));
+        io.write(size_only ? nullptr : st.blobs[i].data(), size);
+    }
+}
+
+void llama_context::pp_state_read(llama_io_read_i & io, llama_seq_id seq_id, llama_state_seq_flags flags) {
+    if (!pp_net || model.pp_rank != 0) {
+        return;
+    }
+
+    pp_net->flush_ops();
+
+    uint32_t n = 0;
+    io.read(&n, sizeof(n));
+    if (n != model.pp_n_world - 1) {
+        throw std::runtime_error(format("prima: the state has %u workers, the ring has %u", n, model.pp_n_world - 1));
+    }
+
+    llama_prima_state st;
+    st.op     = LLAMA_PRIMA_STATE_SET;
+    st.seq_id = seq_id;
+    st.flags  = flags;
+    st.ranks.resize(n);
+    st.blobs.resize(n);
+    for (uint32_t i = 0; i < n; ++i) {
+        uint64_t size = 0;
+        io.read(&st.ranks[i], sizeof(st.ranks[i]));
+        io.read(&size, sizeof(size));
+        st.blobs[i].resize(size);
+        io.read(st.blobs[i].data(), size);
+    }
+
+    pp_net->send_state(st);
+
+    llama_prima_data data;
+    std::vector<llama_prima_op> ops;
+    if (pp_net->recv(data, ops, &st) != LLAMA_PRIMA_MSG_STATE || st.ranks.size() != n) {
+        throw std::runtime_error("prima: unexpected message while waiting for the workers to load the state");
+    }
+    for (uint32_t i = 0; i < n; ++i) {
+        if (st.blobs[i].size() != 1 || st.blobs[i][0] != 1) {
+            throw std::runtime_error(format("prima: rank %u failed to load the state", st.ranks[i]));
+        }
+    }
+}
+
+// prima.cpp: a worker adds its own memory state to the message, or reads it
+void llama_context::pp_state_apply(llama_prima_state & st) {
+    const uint32_t rank = model.pp_rank;
+
+    if (st.op == LLAMA_PRIMA_STATE_SET) {
+        for (size_t i = 0; i < st.ranks.size(); ++i) {
+            if (st.ranks[i] != rank) {
+                continue;
+            }
+
+            uint8_t ok = 0;
+            try {
+                llama_io_read_host io(st.blobs[i].data(), st.blobs[i].size());
+                memory->state_read(io, st.seq_id, st.flags);
+                ok = 1;
+            } catch (const std::exception & e) {
+                LLAMA_LOG_ERROR("%s: failed to load the state: %s\n", __func__, e.what());
+            }
+            st.blobs[i].assign(1, ok);
+        }
+        return;
+    }
+
+    llama_io_write_dummy io_size(false);
+    memory->state_write(io_size, st.seq_id, st.flags);
+    const uint64_t size = io_size.n_bytes();
+
+    std::vector<uint8_t> blob;
+    if (st.op == LLAMA_PRIMA_STATE_GET_SIZE) {
+        blob.resize(sizeof(size));
+        memcpy(blob.data(), &size, sizeof(size));
+    } else {
+        blob.resize(size);
+        llama_io_write_host io(blob.data(), blob.size());
+        memory->state_write(io, st.seq_id, st.flags);
+    }
+
+    st.ranks.push_back(rank);
+    st.blobs.push_back(std::move(blob));
 }
 
 //

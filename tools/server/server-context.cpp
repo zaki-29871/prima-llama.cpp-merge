@@ -1570,16 +1570,6 @@ private:
             batch.init(ctx_tgt, std::max(n_batch, params_base.n_parallel), n_embd);
         }
 
-        // prima.cpp: the KV cache is split across the ring, the server cannot save or restore it
-        if (params_base.n_world > 1) {
-            if (params_base.cache_ram_mib != 0 || params_base.n_ctx_checkpoints > 0) {
-                SRV_WRN("%s", "prompt cache and context checkpoints are not supported with --world > 1, disabling them\n");
-            }
-            params_base.cache_ram_mib     = 0;
-            params_base.cache_idle_slots  = false;
-            params_base.n_ctx_checkpoints = 0;
-        }
-
         // decision requests rarely repeat a state, the prompt cache is opt-in for decision models
         if (decision.type != COMMON_DECISION_TYPE_NONE && !params_base.cache_ram_explicit) {
             SRV_INF("%s", "decision model: prompt cache disabled by default, use `--cache-ram N` to enable it\n");
